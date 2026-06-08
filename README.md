@@ -78,6 +78,49 @@ research  -> build_reading_list
 coding    -> write_patch
 ```
 
+## Optional Small Reasoning Model
+
+The default workflow does not require a model. For local reasoning, the recommended small profile is **Qwen3 4B**:
+
+- Ollama: `qwen3:4b`
+- vLLM: `Qwen/Qwen3-4B`
+- Smaller fallback: `qwen3:1.7b` on Ollama or `Qwen/Qwen3-0.6B` on vLLM
+
+Run with Ollama:
+
+```bash
+ollama pull qwen3:4b
+PYTHONPATH=src python3 -m agent_weaver.cli \
+  --use-case coding \
+  --task examples/coding/task_bugfix.json \
+  --planner ollama \
+  --model-profile ollama-qwen3-4b
+```
+
+Run with vLLM:
+
+```bash
+vllm serve Qwen/Qwen3-4B --reasoning-parser qwen3
+PYTHONPATH=src python3 -m agent_weaver.cli \
+  --use-case research \
+  --task examples/research/task_lit_scan.json \
+  --planner vllm \
+  --model-profile vllm-qwen3-4b
+```
+
+For very small machines:
+
+```bash
+ollama pull qwen3:1.7b
+PYTHONPATH=src python3 -m agent_weaver.cli \
+  --use-case guardrail \
+  --task examples/guardrail/task_pii.json \
+  --planner ollama \
+  --model-profile ollama-qwen3-1.7b
+```
+
+The model planner can propose an action, but `PolicyDecision` and `Verification` still constrain the final result.
+
 ## Project Layout
 
 ```text
@@ -87,7 +130,7 @@ src/agent_weaver/
   generic_agents.py  # reusable keyword, policy, planner, verifier agents
   scenarios.py       # recipes for support, guardrail, CRM, research, coding
   retrieval.py       # dependency-free markdown retrieval
-  llm.py             # optional stdlib Ollama client
+  llm.py             # optional stdlib Ollama/vLLM reasoning clients
   cli.py             # command-line interface
 examples/
   support/
@@ -108,12 +151,12 @@ PYTHONPATH=src python3 -m unittest discover -s tests
 
 - Python standard library for the default runnable implementation.
 - Markdown files for local knowledge bases.
-- Optional local LLM providers: Ollama, llama.cpp, vLLM, LocalAI.
+- Optional local LLM providers: Ollama, vLLM, llama.cpp, LocalAI.
 - Optional retrieval stores: SQLite FTS, Chroma, Qdrant, LanceDB.
 
 ## Extension Ideas
 
-- Add an `OllamaPlannerAgent` while keeping deterministic policy and verification.
+- Add more model-backed planners while keeping deterministic policy and verification.
 - Store `Outcome` audit trails as JSONL for evaluation.
 - Connect actions to Zendesk, Salesforce, HubSpot, GitHub Issues, Jira, Slack, or email.
 - Add a human approval queue for verifier failures.

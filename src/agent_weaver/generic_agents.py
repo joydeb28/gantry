@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 
+from .llm import ReasoningClient
 from .models import Evidence, Plan, PolicyDecision, Signal, Task, Verification
 
 
@@ -117,3 +119,96 @@ class BasicVerifierAgent:
 
         score = max(0.0, 1.0 - 0.25 * len(findings))
         return Verification(approved=not findings, score=score, findings=tuple(findings))
+
+
+@dataclass(frozen=True)
+class ReasoningPlannerAgent:
+    client: ReasoningClient
+    fallback: TemplatePlannerAgent
+
+    def run(
+        self,
+        task: Task,
+        signal: Signal,
+        evidence: tuple[Evidence, ...],
+        policy: PolicyDecision,
+    ) -> Plan:
+        if signal.missing_fields:
+            return self.fallback.run(task, signal, evidence, policy)
+
+        prompt = self._prompt(task, signal, evidence, policy)
+        response = self.client.chat(
+            [
+                {
+                    "role": "system",
+                    "content": "You are a compact reasoning planner. Return only valid JSON. Do not include markdown.",
+                },
+                {"role": "user", "content": prompt},
+            ]
+        )
+        try:
+            plan = json.loads(_extract_json(response.content))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return self.fallback.run(task, signal, evidence, policy)
+
+        action = str(plan.get("action", "")).strip()
+        if action not in policy.allowed_actions:
+            action = "escalate"
+
+        citations = tuple(item.title for item in evidence[:2])
+        confidence = _bounded_float(plan.get("confidence", 0.72), 0.0, 1.0)
+        return Plan(
+            action=action,
+            confidence=confidence,
+            response=str(plan.get("response", "")).strip() or self.fallback.default_response,
+            internal_note=(
+                f"reasoning_model=enabled; intent={signal.intent}; "
+                f"thinking_chars={len(response.thinking)}; policy={policy.reason}"
+            ),
+            citations=citations,
+        )
+
+    def _prompt(self, task: Task, signal: Signal, evidence: tuple[Evidence, ...], policy: PolicyDecision) -> str:
+        evidence_text = "\n\n".join(f"[{item.title}]\n{item.text[:900]}" for item in evidence[:3]) or "No evidence retrieved."
+        return json.dumps(
+            {
+                "task": {"id": task.id, "use_case": task.use_case, "title": task.title, "body": task.body, "metadata": task.metadata},
+                "signal": {
+                    "intent": signal.intent,
+                    "risk": signal.risk,
+                    "tags": signal.tags,
+                    "missing_fields": signal.missing_fields,
+                },
+                "policy": {
+                    "allowed_actions": policy.allowed_actions,
+                    "blocked_actions": policy.blocked_actions,
+                    "reason": policy.reason,
+                },
+                "evidence": evidence_text,
+                "instructions": (
+                    "Choose exactly one allowed action. Return JSON with keys: "
+                    "action, confidence, response. confidence must be between 0 and 1."
+                ),
+            },
+            indent=2,
+            default=str,
+        )
+
+
+def _extract_json(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        return stripped
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("No JSON object found")
+    return stripped[start : end + 1]
+
+
+def _bounded_float(value: object, minimum: float, maximum: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = minimum
+    return max(minimum, min(number, maximum))
