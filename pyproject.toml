@@ -3,18 +3,18 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agentic-support-weaver"
+name = "agentic-pattern-weaver"
 version = "0.1.0"
-description = "A small, offline-first agentic AI pattern for customer support ticket resolution."
+description = "A small, offline-first agentic AI pattern for many automation use cases."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Joydeb Mondal" }]
-keywords = ["agentic-ai", "customer-support", "agents", "ollama", "automation"]
+keywords = ["agentic-ai", "agents", "guardrails", "crm", "research", "coding-assistants", "automation"]
 dependencies = []
 
 [project.scripts]
-support-weaver = "support_weaver.cli:main"
+agent-weaver = "agent_weaver.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1,0 +1,9 @@
+{
+  "id": "RES-4001",
+  "use_case": "research",
+  "title": "Survey papers for agent memory",
+  "body": "Build a literature scan on state of the art approaches for long-term memory in agentic AI systems.",
+  "metadata": {
+    "source_count": 3
+  }
+}

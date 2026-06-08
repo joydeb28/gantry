@@ -1,8 +1,0 @@
-{
-  "id": "TCK-1002",
-  "subject": "Refund for old order",
-  "body": "I want a refund for an item I bought two months ago. It was charged incorrectly.",
-  "customer_tier": "vip",
-  "order_value_usd": 399.0,
-  "days_since_purchase": 61
-}

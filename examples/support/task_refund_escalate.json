@@ -1,0 +1,10 @@
+{
+  "id": "SUP-1002",
+  "use_case": "support",
+  "title": "Refund for old order",
+  "body": "I want a refund for an item I bought two months ago. It was charged incorrectly.",
+  "metadata": {
+    "value_usd": 399,
+    "days_since_event": 61
+  }
+}

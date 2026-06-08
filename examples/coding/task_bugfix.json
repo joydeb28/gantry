@@ -1,0 +1,9 @@
+{
+  "id": "COD-5001",
+  "use_case": "coding",
+  "title": "Fix failing checkout test",
+  "body": "A bug causes a failing test when the discount code is empty. Please implement a fix and run focused tests.",
+  "metadata": {
+    "production_change": false
+  }
+}

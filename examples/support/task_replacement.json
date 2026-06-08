@@ -1,0 +1,10 @@
+{
+  "id": "SUP-1001",
+  "use_case": "support",
+  "title": "Coffee grinder arrived cracked",
+  "body": "The lid is broken and the grinder body is cracked. I ordered it last week and I am frustrated.",
+  "metadata": {
+    "value_usd": 89,
+    "days_since_event": 7
+  }
+}

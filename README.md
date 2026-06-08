@@ -1,95 +1,123 @@
-# Agentic Support Weaver
+# Agentic Pattern Weaver
 
-Agentic Support Weaver is a small, offline-first reference implementation for customer support ticket resolution.
+Agentic Pattern Weaver is a small, offline-first reference implementation for building agentic AI workflows across many use cases.
 
-The novel pattern is **claim weaving**: each agent emits a tiny typed claim, then the workflow weaves those claims only when evidence, policy, and verification agree. This keeps the system simple enough to inspect while still looking like a real agentic workflow.
+The core pattern is **claim weaving**: each agent emits a small typed claim, then the workflow composes those claims only when evidence, policy, and verification agree. It is simple enough to inspect, but structured enough to adapt to production domains.
 
-## Why This Exists
+## Use Cases Included
 
-Most agent demos jump straight to a giant prompt. This repo shows a pattern teams can adopt incrementally:
+- Guardrails
+- Customer support automation
+- Sales CRM management
+- Research assistants
+- Coding assistants
 
-- Triage agent classifies intent, urgency, and missing fields.
-- Retriever agent finds support policy evidence from local markdown.
-- Policy agent applies deterministic business rules.
-- Resolution agent drafts an action and customer reply.
-- Verifier agent blocks unsupported or policy-unsafe automation.
-- Fallback path escalates instead of guessing.
+All examples use the same core workflow:
 
-The default implementation uses only the Python standard library. You can later swap individual agents for local LLM calls through Ollama, llama.cpp servers, vLLM, or any OpenAI-compatible local gateway.
+```text
+Task
+  -> Signal
+  -> Evidence[]
+  -> PolicyDecision
+  -> Plan
+  -> Verification
+  -> Outcome
+```
+
+## Why This Is Different
+
+Most agent demos start with one large prompt. This repo starts with an adoptable design pattern:
+
+- **Signal agent** classifies intent, risk, missing fields, and tags.
+- **Retriever** finds local evidence from markdown knowledge bases.
+- **Policy agent** applies deterministic constraints before action.
+- **Planner agent** proposes the next action and response.
+- **Verifier agent** blocks unsupported, low-confidence, or policy-unsafe plans.
+- **Fallback path** escalates instead of guessing.
+
+The runnable baseline uses only the Python standard library. You can swap any agent for Ollama, llama.cpp, vLLM, LocalAI, or another free/open-source local model gateway.
 
 ## Quick Start
 
 ```bash
-cd agentic-support-weaver
-python -m venv .venv
+cd agentic-pattern-weaver
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-support-weaver --ticket examples/ticket_damaged.json --kb examples/kb
 ```
 
-Expected final action for the damaged-item example: `replace`.
+Run an example:
 
-Run tests with only the standard library:
+```bash
+agent-weaver --use-case support --task examples/support/task_replacement.json
+```
+
+Without installing:
+
+```bash
+PYTHONPATH=src python3 -m agent_weaver.cli --use-case guardrail --task examples/guardrail/task_pii.json
+```
+
+## Example Commands
+
+```bash
+PYTHONPATH=src python3 -m agent_weaver.cli --use-case support --task examples/support/task_replacement.json
+PYTHONPATH=src python3 -m agent_weaver.cli --use-case guardrail --task examples/guardrail/task_pii.json
+PYTHONPATH=src python3 -m agent_weaver.cli --use-case crm --task examples/crm/task_hot_lead.json
+PYTHONPATH=src python3 -m agent_weaver.cli --use-case research --task examples/research/task_lit_scan.json
+PYTHONPATH=src python3 -m agent_weaver.cli --use-case coding --task examples/coding/task_bugfix.json
+```
+
+Expected final actions:
+
+```text
+support   -> replace
+guardrail -> redact
+crm       -> schedule_demo
+research  -> build_reading_list
+coding    -> write_patch
+```
+
+## Project Layout
+
+```text
+src/agent_weaver/
+  models.py          # generic Task, Signal, PolicyDecision, Plan, Outcome
+  pattern.py         # claim-weaving orchestration
+  generic_agents.py  # reusable keyword, policy, planner, verifier agents
+  scenarios.py       # recipes for support, guardrail, CRM, research, coding
+  retrieval.py       # dependency-free markdown retrieval
+  llm.py             # optional stdlib Ollama client
+  cli.py             # command-line interface
+examples/
+  support/
+  guardrail/
+  crm/
+  research/
+  coding/
+tests/
+```
+
+## Tests
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests
 ```
 
-## Design Pattern: Claim Weaving
+## Free/Open-Source Stack
 
-Instead of letting one agent decide everything, the workflow produces auditable intermediate objects:
-
-```text
-Ticket
-  -> TriageClaim
-  -> Evidence[]
-  -> PolicyClaim
-  -> ActionPlan
-  -> Verification
-  -> Resolution
-```
-
-This is useful for support automation because the hardest problem is not generating a nice reply. The hard problem is knowing when automation is allowed, where the answer came from, and when to escalate.
-
-## Example Output
-
-```json
-{
-  "ticket_id": "TCK-1001",
-  "final_action": "replace",
-  "customer_reply": "I am sorry the item arrived damaged. I can arrange a replacement right away under our 30-day damage policy."
-}
-```
+- Python standard library for the default runnable implementation.
+- Markdown files for local knowledge bases.
+- Optional local LLM providers: Ollama, llama.cpp, vLLM, LocalAI.
+- Optional retrieval stores: SQLite FTS, Chroma, Qdrant, LanceDB.
 
 ## Extension Ideas
 
-- Replace `TinyRetriever` with Chroma, LanceDB, Qdrant, or SQLite FTS.
-- Add an Ollama-backed `ResolutionAgent` while keeping deterministic policy and verification.
-- Emit `Resolution` objects to Zendesk, Freshdesk, GitHub Issues, or Slack.
+- Add an `OllamaPlannerAgent` while keeping deterministic policy and verification.
+- Store `Outcome` audit trails as JSONL for evaluation.
+- Connect actions to Zendesk, Salesforce, HubSpot, GitHub Issues, Jira, Slack, or email.
 - Add a human approval queue for verifier failures.
-- Store audit trails as JSONL for later evaluation.
-
-## Project Layout
-
-```text
-src/support_weaver/
-  agents.py      # triage, resolution, verifier agents
-  policy.py      # deterministic business policy
-  retrieval.py   # dependency-free markdown retrieval
-  workflow.py    # claim-weaving orchestration
-  cli.py         # command-line interface
-examples/
-  kb/            # sample support knowledge base
-  ticket_*.json  # sample tickets
-tests/
-```
-
-## Free/Open-Source Stack
-
-- Python standard library for the runnable baseline.
-- Markdown files for a local knowledge base.
-- Optional local LLM providers: Ollama, llama.cpp, vLLM, LocalAI.
-- Optional vector stores: Chroma, Qdrant, LanceDB, SQLite FTS.
+- Replace keyword signals with embeddings or a small local classifier.
 
 ## License
 

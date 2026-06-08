@@ -1,0 +1,9 @@
+{
+  "id": "CRM-3001",
+  "use_case": "crm",
+  "title": "Inbound enterprise demo request",
+  "body": "The VP of Ops asked for a demo this week. They have budget and are the decision maker.",
+  "metadata": {
+    "value_usd": 12000
+  }
+}
