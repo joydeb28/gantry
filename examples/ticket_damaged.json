@@ -1,0 +1,8 @@
+{
+  "id": "TCK-1001",
+  "subject": "My coffee grinder arrived cracked",
+  "body": "The lid is broken and the grinder body is cracked. I ordered it last week and I am frustrated.",
+  "customer_tier": "standard",
+  "order_value_usd": 89.0,
+  "days_since_purchase": 7
+}
