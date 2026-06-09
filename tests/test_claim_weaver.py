@@ -1,8 +1,8 @@
 from pathlib import Path
 import unittest
 
-from agent_weaver.models import Task
-from agent_weaver.scenarios import weaver_for
+from agentic_harness.models import Task
+from agentic_harness.scenarios import weaver_for
 
 
 ROOT = Path(__file__).resolve().parents[1]

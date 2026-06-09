@@ -3,18 +3,32 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agentic-pattern-weaver"
-version = "0.1.0"
-description = "A small, offline-first agentic AI pattern for many automation use cases."
+name = "agentic-harness"
+version = "0.2.0"
+description = "A multi-pattern agentic AI harness — six patterns, nine use cases, zero external dependencies."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Joydeb Mondal" }]
-keywords = ["agentic-ai", "agents", "guardrails", "crm", "research", "coding-assistants", "automation"]
+keywords = [
+  "agentic-ai",
+  "agents",
+  "harness",
+  "orchestrator",
+  "guardrails",
+  "human-in-the-loop",
+  "reflection",
+  "router",
+  "plan-execute",
+  "crm",
+  "research",
+  "coding-assistants",
+  "automation",
+]
 dependencies = []
 
 [project.scripts]
-agent-weaver = "agent_weaver.cli:main"
+agentic-harness = "agentic_harness.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

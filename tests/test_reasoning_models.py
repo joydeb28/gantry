@@ -2,14 +2,14 @@ import json
 import unittest
 from unittest.mock import patch
 
-from agent_weaver.generic_agents import ReasoningPlannerAgent, TemplatePlannerAgent
-from agent_weaver.llm import (
+from agentic_harness.generic_agents import ReasoningPlannerAgent, TemplatePlannerAgent
+from agentic_harness.llm import (
     OllamaReasoningClient,
     ReasoningResponse,
     SMALL_REASONING_MODELS,
     VLLMReasoningClient,
 )
-from agent_weaver.models import Evidence, PolicyDecision, Signal, Task
+from agentic_harness.models import Evidence, PolicyDecision, Signal, Task
 
 
 class FakeHTTPResponse:

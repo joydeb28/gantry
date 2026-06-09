@@ -1,0 +1,11 @@
+{
+  "id": "LEGAL-2001",
+  "use_case": "legal",
+  "title": "NDA review — Acme Corp partnership",
+  "body": "We have received an NDA and partnership agreement from Acme Corp. The contract contains a non-standard liability clause capping liability at £1,000 regardless of contract value. Please review the contract and flag any clauses that deviate from standard policy.",
+  "metadata": {
+    "contract_value_gbp": 150000,
+    "counterparty": "Acme Corp",
+    "governing_law": "UK"
+  }
+}

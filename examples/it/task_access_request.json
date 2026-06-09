@@ -1,0 +1,11 @@
+{
+  "id": "IT-4001",
+  "use_case": "it",
+  "title": "VPN and GitHub access request",
+  "body": "I need access to the company VPN and GitHub organisation for my new project. My manager Alex Thompson has already approved this request verbally. I need read-write permission to the backend-services repository.",
+  "metadata": {
+    "employee_id": "EMP-0891",
+    "department": "Engineering",
+    "manager": "Alex Thompson"
+  }
+}

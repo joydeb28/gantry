@@ -1,0 +1,12 @@
+{
+  "id": "FIN-3001",
+  "use_case": "finance",
+  "title": "Invoice approval — Cloud infrastructure vendor",
+  "body": "We have received a vendor invoice for cloud infrastructure services for the month of May 2026. The invoice matches the purchase order and services have been confirmed as delivered. Please process the invoice for payment.",
+  "metadata": {
+    "value_usd": 180,
+    "vendor": "CloudCo Ltd",
+    "po_number": "PO-2026-0512",
+    "days_since_event": 5
+  }
+}

@@ -112,7 +112,7 @@ class BasicVerifierAgent:
         findings: list[str] = []
         if draft.action not in policy.allowed_actions:
             findings.append(f"Action '{draft.action}' is not allowed.")
-        if draft.action not in {"escalate", "ask_for_info", "log_only"} and not evidence:
+        if draft.action not in {"escalate", "ask_for_info", "log_only", "pending_approval"} and not evidence:
             findings.append("No evidence retrieved for automated action.")
         if draft.confidence < 0.7:
             findings.append("Draft confidence below threshold.")

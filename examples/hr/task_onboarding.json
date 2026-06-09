@@ -1,0 +1,11 @@
+{
+  "id": "HR-1001",
+  "use_case": "hr",
+  "title": "New hire onboarding — Sarah Chen",
+  "body": "Sarah Chen is joining the engineering team on 2026-06-15 as a Senior Backend Engineer. Please onboard her and send the welcome kit with all account provisioning instructions.",
+  "metadata": {
+    "start_date": "2026-06-15",
+    "department": "Engineering",
+    "role": "Senior Backend Engineer"
+  }
+}
