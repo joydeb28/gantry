@@ -6,12 +6,13 @@ Each pattern class implements the same interface:
     outcome = weaver.run(task)
 
 Available patterns:
-- PipelineWeaver       : Sequential claim-weaving chain (support, crm)
-- OrchestratorWeaver   : Orchestrator + N sub-agents fan-out (guardrail)
-- RouterWeaver         : Classify → dispatch to specialist agent (it helpdesk)
-- ReflectionWeaver     : Draft → Critic loop until approved (legal)
-- HumanInTheLoopWeaver : Pause at checkpoint, resume on approval (hr)
-- PlanExecuteWeaver    : Multi-step plan, each step verified (finance)
+- PipelineWeaver          : Sequential claim-weaving chain (support, crm)
+- OrchestratorWeaver      : Orchestrator + N sub-agents fan-out (guardrail)
+- FraudOrchestratorWeaver : Fraud-specialist orchestrator + 5 sub-agents (fraud)
+- RouterWeaver            : Classify → dispatch to specialist agent (it helpdesk)
+- ReflectionWeaver        : Draft → Critic loop until approved (legal)
+- HumanInTheLoopWeaver    : Pause at checkpoint, resume on approval (hr)
+- PlanExecuteWeaver       : Multi-step plan, each step verified (finance)
 """
 
 from .pipeline import PipelineWeaver
@@ -20,6 +21,15 @@ from .router import RouterWeaver, SpecialistAgent
 from .reflection import ReflectionWeaver, CriticAgent, Critique
 from .hitl import HumanInTheLoopWeaver, CHECKPOINT_ACTION
 from .plan_execute import PlanExecuteWeaver, ExecutionStep
+from .fraud import (
+    FraudOrchestratorWeaver,
+    FraudFinding,
+    CardFraudSubAgent,
+    AccountTakeoverSubAgent,
+    SyntheticIdentitySubAgent,
+    VelocitySubAgent,
+    GeoRiskSubAgent,
+)
 
 __all__ = [
     "PipelineWeaver",
@@ -38,4 +48,11 @@ __all__ = [
     "CHECKPOINT_ACTION",
     "PlanExecuteWeaver",
     "ExecutionStep",
+    "FraudOrchestratorWeaver",
+    "FraudFinding",
+    "CardFraudSubAgent",
+    "AccountTakeoverSubAgent",
+    "SyntheticIdentitySubAgent",
+    "VelocitySubAgent",
+    "GeoRiskSubAgent",
 ]

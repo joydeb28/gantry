@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agentic-harness"
-version = "0.2.0"
-description = "A multi-pattern agentic AI harness — six patterns, nine use cases, zero external dependencies."
+name = "gantry"
+version = "0.3.0"
+description = "A multi-pattern agentic AI harness — LangGraph patterns, LangChain LLMs, LlamaIndex RAG, Pydantic v2 models."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -13,6 +13,10 @@ authors = [{ name = "Joydeb Mondal" }]
 keywords = [
   "agentic-ai",
   "agents",
+  "langgraph",
+  "langchain",
+  "llamaindex",
+  "pydantic",
   "harness",
   "orchestrator",
   "guardrails",
@@ -20,15 +24,38 @@ keywords = [
   "reflection",
   "router",
   "plan-execute",
+  "fraud-detection",
   "crm",
   "research",
   "coding-assistants",
-  "automation",
 ]
-dependencies = []
+dependencies = [
+    # Data validation & serialisation
+    "pydantic>=2.0",
+    # Agentic pattern orchestration
+    "langgraph>=1.2",
+    # LLM abstractions — structured output, prompts, LCEL
+    "langchain>=1.3",
+    "langchain-core>=1.4",
+    "langchain-ollama>=1.1",
+    # Vector RAG retrieval with local embeddings
+    "llama-index-core>=0.14",
+    "llama-index-embeddings-huggingface>=0.4",
+]
+
+[project.optional-dependencies]
+# Production-grade HITL persistence (swap InMemorySaver)
+prod = [
+    "langgraph-checkpoint-sqlite",
+    "langgraph-checkpoint-postgres",
+]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+]
 
 [project.scripts]
-agentic-harness = "agentic_harness.cli:main"
+gantry = "gantry.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

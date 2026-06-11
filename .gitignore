@@ -5,3 +5,6 @@ __pycache__/
 dist/
 build/
 .DS_Store
+*.db
+.llama_index_cache/
+scratch/

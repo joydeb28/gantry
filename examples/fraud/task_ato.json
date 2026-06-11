@@ -1,0 +1,16 @@
+{
+  "id": "FRD-1002",
+  "use_case": "fraud",
+  "title": "Suspicious login from new device followed by wire transfer",
+  "body": "Account holder logged in from an unrecognised device after multiple failed login attempts. Credential stuffing patterns detected by gateway. Session hijack risk elevated. Attempting to initiate a wire transfer of $3,200 to an overseas account.",
+  "metadata": {
+    "amount_usd": 3200,
+    "account_age_days": 420,
+    "device_fingerprint_match": false,
+    "recent_password_reset": false,
+    "transaction_count_1h": 2,
+    "transaction_count_10min": 2,
+    "country_code": "ng",
+    "impossible_travel": false
+  }
+}

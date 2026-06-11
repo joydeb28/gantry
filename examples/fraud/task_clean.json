@@ -1,0 +1,16 @@
+{
+  "id": "FRD-1004",
+  "use_case": "fraud",
+  "title": "Normal low-value domestic transaction",
+  "body": "Customer purchasing a $42 meal delivery order from their home city. Same device used for the last 60 days. No unusual patterns. Account is 3 years old.",
+  "metadata": {
+    "amount_usd": 42,
+    "account_age_days": 1095,
+    "device_fingerprint_match": true,
+    "recent_password_reset": false,
+    "transaction_count_1h": 1,
+    "transaction_count_10min": 1,
+    "country_code": "us",
+    "impossible_travel": false
+  }
+}

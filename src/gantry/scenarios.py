@@ -4,23 +4,26 @@ Each recipe returns a weaver instance configured with the right
 agentic pattern and agents for that domain.
 
 Pattern summary:
-  support   -> PipelineWeaver       (sequential claim chain)
-  crm       -> PipelineWeaver       (sequential claim chain)
-  research  -> PipelineWeaver       (sequential claim chain)
-  coding    -> PipelineWeaver       (sequential claim chain)
-  guardrail -> OrchestratorWeaver   (orchestrator + sub-agents)
-  it        -> RouterWeaver         (router + specialist dispatch)
-  legal     -> ReflectionWeaver     (draft -> critic loop)
-  hr        -> HumanInTheLoopWeaver (checkpoint + resume)
-  finance   -> PlanExecuteWeaver    (multi-step plan execution)
+  support   -> PipelineWeaver          (sequential claim chain)
+  crm       -> PipelineWeaver          (sequential claim chain)
+  research  -> PipelineWeaver          (sequential claim chain)
+  coding    -> PipelineWeaver          (sequential claim chain)
+  guardrail -> OrchestratorWeaver      (orchestrator + sub-agents)
+  fraud     -> FraudOrchestratorWeaver (5 specialist fraud sub-agents)
+  it        -> RouterWeaver            (router + specialist dispatch)
+  legal     -> ReflectionWeaver        (draft -> critic loop)
+  hr        -> HumanInTheLoopWeaver    (checkpoint + resume)
+  finance   -> PlanExecuteWeaver       (multi-step plan execution)
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Optional
 
 from .generic_agents import BasicVerifierAgent, KeywordSignalAgent, RulePolicyAgent, TemplatePlannerAgent
-from .pattern import AgentRecipe, ClaimWeaver
+from .models import AgentRecipe
+from .patterns.pipeline import PipelineWeaver
 from .patterns.hitl import HumanInTheLoopWeaver
 from .patterns.orchestrator import (
     ExternalSendSubAgent,
@@ -32,14 +35,28 @@ from .patterns.orchestrator import (
 from .patterns.plan_execute import PlanExecuteWeaver
 from .patterns.reflection import CriticAgent, ReflectionWeaver
 from .patterns.router import RouterWeaver, SpecialistAgent
-from .retrieval import TinyRetriever
+from .patterns.fraud import (
+    FraudOrchestratorWeaver,
+    CardFraudSubAgent,
+    AccountTakeoverSubAgent,
+    SyntheticIdentitySubAgent,
+    VelocitySubAgent,
+    GeoRiskSubAgent,
+)
+from .retrieval import KnowledgeBaseRetriever
 
 
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
-def weaver_for(use_case: str, kb_root: str | Path = "examples") -> object:
+def weaver_for(
+    use_case: str,
+    kb_root: str | Path = "examples",
+    planner_type: str = "template",
+    model_name: Optional[str] = None,
+    base_url: Optional[str] = None,
+) -> Any:
     """Return the correct weaver for a use case, loaded with its KB.
 
     Each use case uses a different agentic pattern. The returned object
@@ -51,6 +68,7 @@ def weaver_for(use_case: str, kb_root: str | Path = "examples") -> object:
         "research": _pipeline_weaver,
         "coding": _pipeline_weaver,
         "guardrail": _orchestrator_weaver,
+        "fraud": _fraud_weaver,
         "it": _router_weaver,
         "legal": _reflection_weaver,
         "hr": _hitl_weaver,
@@ -63,9 +81,19 @@ def weaver_for(use_case: str, kb_root: str | Path = "examples") -> object:
             f"Unknown use case '{use_case}'. Choose one of: {', '.join(sorted(builders))}"
         ) from exc
 
-    kb_path = Path(kb_root) / use_case / "kb"
-    retriever = TinyRetriever.from_markdown_dir(kb_path)
-    return builder(use_case, retriever)
+    retriever = KnowledgeBaseRetriever.from_use_case(use_case, kb_root=kb_root)
+
+    # Dynamically build the LLM-powered planner agent if requested
+    planner_agent = None
+    if planner_type in ("ollama", "vllm"):
+        from .llm import LangChainPlanner, LangChainPlannerAgent
+        model = model_name or ("qwen3:4b" if planner_type == "ollama" else "Qwen/Qwen3-4B")
+        default_url = "http://localhost:11434" if planner_type == "ollama" else "http://localhost:8000"
+        url = base_url or default_url
+        planner = LangChainPlanner(model=model, base_url=url)
+        planner_agent = LangChainPlannerAgent(planner)
+
+    return builder(use_case, retriever, planner_agent=planner_agent)
 
 
 def recipe_for(use_case: str) -> AgentRecipe:
@@ -92,34 +120,69 @@ def recipe_for(use_case: str) -> AgentRecipe:
 # Internal builder helpers
 # ---------------------------------------------------------------------------
 
-def _pipeline_weaver(use_case: str, retriever: TinyRetriever) -> ClaimWeaver:
+def _pipeline_weaver(
+    use_case: str,
+    retriever: KnowledgeBaseRetriever,
+    planner_agent: Optional[Any] = None,
+) -> PipelineWeaver:
     recipe_map = {
         "support": support_recipe,
         "crm": crm_recipe,
         "research": research_recipe,
         "coding": coding_recipe,
     }
-    return ClaimWeaver(recipe_map[use_case](), retriever)
+    recipe = recipe_map[use_case]()
+    if planner_agent is not None:
+        recipe = recipe.model_copy(update={"planner_agent": planner_agent})
+    return PipelineWeaver(recipe, retriever)
 
 
-def _orchestrator_weaver(use_case: str, retriever: TinyRetriever) -> OrchestratorWeaver:
-    return guardrail_harness(retriever)
+def _orchestrator_weaver(
+    use_case: str,
+    retriever: KnowledgeBaseRetriever,
+    planner_agent: Optional[Any] = None,
+) -> OrchestratorWeaver:
+    return guardrail_harness(retriever, planner_agent=planner_agent)
 
 
-def _router_weaver(use_case: str, retriever: TinyRetriever) -> RouterWeaver:
-    return it_harness(retriever)
+def _router_weaver(
+    use_case: str,
+    retriever: KnowledgeBaseRetriever,
+    planner_agent: Optional[Any] = None,
+) -> RouterWeaver:
+    return it_harness(retriever, planner_agent=planner_agent)
 
 
-def _reflection_weaver(use_case: str, retriever: TinyRetriever) -> ReflectionWeaver:
-    return legal_harness(retriever)
+def _reflection_weaver(
+    use_case: str,
+    retriever: KnowledgeBaseRetriever,
+    planner_agent: Optional[Any] = None,
+) -> ReflectionWeaver:
+    return legal_harness(retriever, planner_agent=planner_agent)
 
 
-def _hitl_weaver(use_case: str, retriever: TinyRetriever) -> HumanInTheLoopWeaver:
-    return hr_harness(retriever)
+def _hitl_weaver(
+    use_case: str,
+    retriever: KnowledgeBaseRetriever,
+    planner_agent: Optional[Any] = None,
+) -> HumanInTheLoopWeaver:
+    return hr_harness(retriever, planner_agent=planner_agent)
 
 
-def _plan_execute_weaver(use_case: str, retriever: TinyRetriever) -> PlanExecuteWeaver:
-    return finance_harness(retriever)
+def _plan_execute_weaver(
+    use_case: str,
+    retriever: KnowledgeBaseRetriever,
+    planner_agent: Optional[Any] = None,
+) -> PlanExecuteWeaver:
+    return finance_harness(retriever, planner_agent=planner_agent)
+
+
+def _fraud_weaver(
+    use_case: str,
+    retriever: KnowledgeBaseRetriever,
+    planner_agent: Optional[Any] = None,
+) -> FraudOrchestratorWeaver:
+    return fraud_harness(retriever, planner_agent=planner_agent)
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +310,7 @@ def coding_recipe() -> AgentRecipe:
 # Non-pipeline harnesses
 # ---------------------------------------------------------------------------
 
-def guardrail_harness(retriever: TinyRetriever) -> OrchestratorWeaver:
+def guardrail_harness(retriever: KnowledgeBaseRetriever, planner_agent: Optional[Any] = None) -> OrchestratorWeaver:
     """Guardrails — Orchestrator + Sub-agents pattern.
 
     Four specialist sub-agents check different risk dimensions in parallel.
@@ -274,7 +337,7 @@ def guardrail_harness(retriever: TinyRetriever) -> OrchestratorWeaver:
             },
             blocked_when={"allow": ("external_send",)},
         ),
-        planner_agent=TemplatePlannerAgent(
+        planner_agent=planner_agent or TemplatePlannerAgent(
             templates={
                 "pii": ("redact", "Redact all detected PII fields before processing continues."),
                 "unsafe_prompt": ("escalate", "Route this prompt for policy review; do not execute."),
@@ -291,7 +354,7 @@ def guardrail_harness(retriever: TinyRetriever) -> OrchestratorWeaver:
     )
 
 
-def it_harness(retriever: TinyRetriever) -> RouterWeaver:
+def it_harness(retriever: KnowledgeBaseRetriever, planner_agent: Optional[Any] = None) -> RouterWeaver:
     """IT Helpdesk — Router / Dispatcher pattern.
 
     A router classifies the ticket type and dispatches to one of three
@@ -306,7 +369,7 @@ def it_harness(retriever: TinyRetriever) -> RouterWeaver:
             base_actions=("ask_for_info", "escalate"),
             intent_actions={"access_request": ("grant_access",)},
         ),
-        planner_agent=TemplatePlannerAgent(
+        planner_agent=planner_agent or TemplatePlannerAgent(
             templates={
                 "access_request": ("grant_access", "Provision access per the role matrix; confirm with the manager."),
             },
@@ -320,7 +383,7 @@ def it_harness(retriever: TinyRetriever) -> RouterWeaver:
             base_actions=("open_ticket", "escalate"),
             intent_actions={"incident": ("open_ticket",)},
         ),
-        planner_agent=TemplatePlannerAgent(
+        planner_agent=planner_agent or TemplatePlannerAgent(
             templates={
                 "incident": ("open_ticket", "Open a P2 incident ticket and page the on-call engineer."),
             },
@@ -334,7 +397,7 @@ def it_harness(retriever: TinyRetriever) -> RouterWeaver:
             base_actions=("ask_for_info", "escalate"),
             intent_actions={"hardware_request": ("raise_procurement",)},
         ),
-        planner_agent=TemplatePlannerAgent(
+        planner_agent=planner_agent or TemplatePlannerAgent(
             templates={
                 "hardware_request": ("raise_procurement", "Raise a procurement request with the hardware team."),
             },
@@ -359,7 +422,7 @@ def it_harness(retriever: TinyRetriever) -> RouterWeaver:
     )
 
 
-def legal_harness(retriever: TinyRetriever) -> ReflectionWeaver:
+def legal_harness(retriever: KnowledgeBaseRetriever, planner_agent: Optional[Any] = None) -> ReflectionWeaver:
     """Legal & Compliance — Reflection / Critic Loop pattern.
 
     A drafter produces a plan. The critic checks citations, confidence,
@@ -387,7 +450,7 @@ def legal_harness(retriever: TinyRetriever) -> ReflectionWeaver:
                 "dispute": ("escalate",),
             },
         ),
-        drafter_agent=TemplatePlannerAgent(
+        drafter_agent=planner_agent or TemplatePlannerAgent(
             templates={
                 "contract_review": ("flag_for_review", "Flag the contract for legal counsel review and highlight non-standard clauses."),
                 "compliance_check": ("flag_for_review", "Run a compliance checklist and document any gaps found."),
@@ -404,7 +467,7 @@ def legal_harness(retriever: TinyRetriever) -> ReflectionWeaver:
     )
 
 
-def hr_harness(retriever: TinyRetriever) -> HumanInTheLoopWeaver:
+def hr_harness(retriever: KnowledgeBaseRetriever, planner_agent: Optional[Any] = None) -> HumanInTheLoopWeaver:
     """HR & Onboarding — Human-in-the-Loop pattern.
 
     Leave requests and onboarding trigger a HITL checkpoint: the workflow
@@ -433,7 +496,7 @@ def hr_harness(retriever: TinyRetriever) -> HumanInTheLoopWeaver:
                 "policy_query": ("answer",),
             },
         ),
-        planner_agent=TemplatePlannerAgent(
+        planner_agent=planner_agent or TemplatePlannerAgent(
             templates={
                 "onboarding": ("send_welcome_kit", "Send the onboarding kit and provision all required system accounts."),
                 "leave_request": ("approve_leave", "Approve the leave request per the HR policy and update the HR system."),
@@ -448,7 +511,7 @@ def hr_harness(retriever: TinyRetriever) -> HumanInTheLoopWeaver:
     )
 
 
-def finance_harness(retriever: TinyRetriever) -> PlanExecuteWeaver:
+def finance_harness(retriever: KnowledgeBaseRetriever, planner_agent: Optional[Any] = None) -> PlanExecuteWeaver:
     """Finance & Accounting — Plan -> Execute pattern.
 
     Invoice approvals run through a multi-step verified execution sequence
@@ -477,7 +540,7 @@ def finance_harness(retriever: TinyRetriever) -> PlanExecuteWeaver:
             },
             blocked_when={"approve_payment": ("high_value",)},
         ),
-        planner_agent=TemplatePlannerAgent(
+        planner_agent=planner_agent or TemplatePlannerAgent(
             templates={
                 "invoice_approval": ("approve_payment", "Invoice validated and approved for payment processing."),
                 "expense_claim": ("approve_expense", "Expense claim validated and approved for reimbursement."),
@@ -502,4 +565,64 @@ def finance_harness(retriever: TinyRetriever) -> PlanExecuteWeaver:
                 ("summarize_budget", "summarize"),
             ),
         },
+    )
+
+
+def fraud_harness(retriever: KnowledgeBaseRetriever, planner_agent: Optional[Any] = None) -> FraudOrchestratorWeaver:
+    """Fraud Detection — FraudOrchestratorWeaver + 5 specialist sub-agents.
+
+    Five sub-agents run in parallel, each checking one fraud dimension:
+    - CardFraudSubAgent       : payment card fraud, card-not-present, skimming
+    - AccountTakeoverSubAgent : ATO signals, device mismatch, credential abuse
+    - SyntheticIdentitySubAgent: fake identity, new account + high-value tx
+    - VelocitySubAgent        : transaction velocity abuse / bot-driven attacks
+    - GeoRiskSubAgent         : geo anomalies, impossible travel, high-risk regions
+
+    Risk thresholds:
+      composite score 0-1  -> allow
+      composite score 2-3  -> challenge_user  (step-up auth / OTP)
+      composite score 4-5  -> flag_for_review (analyst queue)
+      composite score 6-8  -> block_transaction
+      composite score 9+   -> freeze_account
+
+    To add a new fraud dimension: create a sub-agent with
+    run(task) -> FraudFinding and add it to sub_agents.
+    """
+    return FraudOrchestratorWeaver(
+        sub_agents=(
+            CardFraudSubAgent(),
+            AccountTakeoverSubAgent(),
+            SyntheticIdentitySubAgent(),
+            VelocitySubAgent(),
+            GeoRiskSubAgent(),
+        ),
+        policy_agent=RulePolicyAgent(
+            base_actions=("allow", "challenge_user", "flag_for_review", "block_transaction", "freeze_account"),
+            intent_actions={
+                "allow":             ("allow",),
+                "challenge_user":    ("challenge_user",),
+                "flag_for_review":   ("flag_for_review",),
+                "block_transaction": ("block_transaction",),
+                "freeze_account":    ("freeze_account", "block_transaction"),
+            },
+        ),
+        planner_agent=planner_agent or TemplatePlannerAgent(
+            templates={
+                "allow":             ("allow",             "Transaction cleared. No fraud signals detected across all checks."),
+                "challenge_user":    ("challenge_user",    "Suspicious signals detected. Sending OTP step-up challenge to the account holder."),
+                "flag_for_review":   ("flag_for_review",   "Multiple fraud signals detected. Flagging transaction for analyst review within 15 minutes."),
+                "block_transaction": ("block_transaction", "High-confidence fraud detected. Transaction blocked. Customer notified via secure channel."),
+                "freeze_account":    ("freeze_account",    "Critical fraud risk. Account frozen and transaction blocked. Fraud team alerted immediately."),
+            },
+            default_action="flag_for_review",
+            default_response="Fraud risk inconclusive. Routing to analyst queue as a precaution.",
+        ),
+        verifier_agent=BasicVerifierAgent(),
+        retriever=retriever,
+        challenge_threshold=2,
+        flag_threshold=4,
+        block_threshold=6,
+        freeze_threshold=9,
+        fallback_action="flag_for_review",
+        fallback_response="Fraud check inconclusive; routing to analyst queue.",
     )

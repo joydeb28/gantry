@@ -1,0 +1,16 @@
+{
+  "id": "FRD-1003",
+  "use_case": "fraud",
+  "title": "Velocity spike — 8 rapid card-testing transactions",
+  "body": "Eight transactions ranging from $0.99 to $4.99 processed in the last 6 minutes on the same card. Classic card testing pattern used to validate stolen card details before a large purchase. Followed by a single $4,800 transaction attempt.",
+  "metadata": {
+    "amount_usd": 4800,
+    "account_age_days": 3,
+    "device_fingerprint_match": true,
+    "recent_password_reset": false,
+    "transaction_count_1h": 9,
+    "transaction_count_10min": 8,
+    "country_code": "us",
+    "impossible_travel": false
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "id": "FRD-1001",
+  "use_case": "fraud",
+  "title": "High-value card-not-present transaction from new device",
+  "body": "Transaction attempt of $7,500 on a card not present order. Customer's device fingerprint does not match any previously seen device. Account registered 12 days ago. Recent password reset was performed 20 minutes before this transaction.",
+  "metadata": {
+    "amount_usd": 7500,
+    "account_age_days": 12,
+    "device_fingerprint_match": false,
+    "recent_password_reset": true,
+    "transaction_count_1h": 1,
+    "transaction_count_10min": 1,
+    "country_code": "us",
+    "impossible_travel": false
+  }
+}
