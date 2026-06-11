@@ -9,7 +9,7 @@
 ## Quick Start
 
 ```bash
-git clone https://github.com/youruser/gantry.git
+git clone https://github.com/joydeb28/gantry.git
 cd gantry
 
 # Create virtual environment and install dependencies
