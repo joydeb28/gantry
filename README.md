@@ -1,6 +1,6 @@
 # Gantry
 
-> **Six production-grade agentic patterns. Nine real-world use cases. Orchestrated with LangGraph, LangChain, LlamaIndex, and Pydantic v2.**
+> **Seven production-grade agentic patterns. Ten real-world use cases. Orchestrated with LangGraph, LangChain, LlamaIndex, and Pydantic v2.**
 
 `gantry` is a production-ready Python toolkit for building **agentic AI systems** using established orchestration patterns. Every use case runs with the pattern best suited to its domain — from a simple sequential pipeline to a cyclic reflection critic loop or human-in-the-loop workflow.
 
@@ -32,7 +32,7 @@ All patterns are implemented as LangGraph `StateGraph` workflows compiled into w
 |---|---|---|---|
 | **Pipeline** | `PipelineWeaver` | Sequential node chain | Customer Support, Sales CRM, Research, Coding |
 | **Orchestrator + Sub-agents** | `OrchestratorWeaver` | `Send` API parallel fan-out & aggregation | Guardrails |
-| **Fraud Orchestrator** | `FraudOrchestratorWeaver` | 5 parallel sub-agents + composite scoring | Fraud Detection |
+| **Parallel Orchestrator** | `ParallelOrchestratorWeaver` | Parallel sub-agents + composite score aggregation | Fraud Detection |
 | **Router / Dispatcher** | `RouterWeaver` | `add_conditional_edges` dynamic specialist routing | IT Helpdesk |
 | **Reflection / Critic Loop** | `ReflectionWeaver` | Cyclic node edge feedback loops | Legal & Compliance |
 | **Human-in-the-Loop** | `HumanInTheLoopWeaver` | Native `interrupt()` state pausing and resuming | HR & Onboarding |
@@ -49,7 +49,7 @@ All patterns are implemented as LangGraph `StateGraph` workflows compiled into w
 | `research` | Research Assistant | Pipeline | `examples/research/task_lit_scan.json` |
 | `coding` | Coding Assistant | Pipeline | `examples/coding/task_bugfix.json` |
 | `guardrail` | Guardrails | Orchestrator + Sub-agents | `examples/guardrail/task_pii.json` |
-| `fraud` | Fraud Detection | Fraud Orchestrator (5 sub-agents) | `examples/fraud/task_card_fraud.json` |
+| `fraud` | Fraud Detection | Parallel Orchestrator (5 sub-agents) | `examples/fraud/task_card_fraud.json` |
 | `it` | IT Helpdesk | Router | `examples/it/task_access_request.json` |
 | `legal` | Legal & Compliance | Reflection / Critic Loop | `examples/legal/task_contract_review.json` |
 | `hr` | HR & Onboarding | Human-in-the-Loop | `examples/hr/task_onboarding.json` |
