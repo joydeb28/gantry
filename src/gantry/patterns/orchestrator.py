@@ -1,8 +1,8 @@
 """Orchestrator + Sub-agents Pattern — LangGraph StateGraph implementation.
 
 A central orchestrator dispatches the incoming task to N specialist sub-agents
-in parallel using the LangGraph Send API. Findings are aggregated, and then the
-shared Policy -> Plan -> Verify pipeline runs.
+in parallel using the LangGraph Send API. Findings are aggregated using an
+intent classification map, and then the shared Policy -> Plan -> Verify pipeline runs.
 """
 
 from __future__ import annotations
@@ -27,109 +27,6 @@ class SubAgent(Protocol):
         ...
 
 
-class PIISubAgent:
-    """Detects personally identifiable information."""
-
-    name: str = "pii_detector"
-    keywords: tuple[str, ...] = (
-        "ssn",
-        "credit card",
-        "passport",
-        "phone number",
-        "date of birth",
-        "bank account",
-        "social security",
-    )
-
-    def run(self, task: Task) -> SubAgentFinding:
-        text = task.text.lower()
-        matches = [k for k in self.keywords if k in text]
-        triggered = bool(matches)
-        return SubAgentFinding(
-            name=self.name,
-            triggered=triggered,
-            reason=f"PII detected: {', '.join(matches)}" if matches else "No PII detected.",
-            risk_delta=2 if triggered else 0,
-        )
-
-
-class SafetySubAgent:
-    """Detects unsafe prompt patterns and jailbreak attempts."""
-
-    name: str = "safety_checker"
-    keywords: tuple[str, ...] = (
-        "ignore previous",
-        "jailbreak",
-        "bypass policy",
-        "ignore instructions",
-        "act as",
-        "pretend you are",
-        "disregard",
-    )
-
-    def run(self, task: Task) -> SubAgentFinding:
-        text = task.text.lower()
-        matches = [k for k in self.keywords if k in text]
-        triggered = bool(matches)
-        return SubAgentFinding(
-            name=self.name,
-            triggered=triggered,
-            reason=f"Unsafe prompt pattern detected: {', '.join(matches)}" if matches else "No unsafe patterns.",
-            risk_delta=3 if triggered else 0,
-        )
-
-
-class ExternalSendSubAgent:
-    """Detects attempts to send data outside the system."""
-
-    name: str = "external_send_detector"
-    keywords: tuple[str, ...] = (
-        "email customer",
-        "post publicly",
-        "send outside",
-        "forward to",
-        "share with",
-        "send to external",
-    )
-
-    def run(self, task: Task) -> SubAgentFinding:
-        text = task.text.lower()
-        matches = [k for k in self.keywords if k in text]
-        triggered = bool(matches)
-        return SubAgentFinding(
-            name=self.name,
-            triggered=triggered,
-            reason=f"External data send attempt: {', '.join(matches)}" if matches else "No external send detected.",
-            risk_delta=2 if triggered else 0,
-        )
-
-
-class ToneSubAgent:
-    """Detects hostile or threatening language."""
-
-    name: str = "tone_guard"
-    keywords: tuple[str, ...] = (
-        "threat",
-        "sue",
-        "lawyer",
-        "hate",
-        "destroy",
-        "attack",
-        "burn",
-    )
-
-    def run(self, task: Task) -> SubAgentFinding:
-        text = task.text.lower()
-        matches = [k for k in self.keywords if k in text]
-        triggered = bool(matches)
-        return SubAgentFinding(
-            name=self.name,
-            triggered=triggered,
-            reason=f"Hostile tone detected: {', '.join(matches)}" if matches else "Tone acceptable.",
-            risk_delta=1 if triggered else 0,
-        )
-
-
 class SubAgentState(TypedDict):
     task: Task
     agent_idx: int
@@ -148,7 +45,18 @@ class OrchestratorState(TypedDict):
 
 
 class OrchestratorWeaver:
-    """Orchestrator + Sub-agents pattern using LangGraph StateGraph."""
+    """Orchestrator + Sub-agents pattern using LangGraph StateGraph.
+
+    Parameters:
+        sub_agents:       Tuple of sub-agents to run in parallel.
+        policy_agent:     Gating policy agent.
+        planner_agent:    Draft planning agent.
+        verifier_agent:   Safety verification agent.
+        retriever:        Vector retrieval client.
+        intent_map:       Dict mapping sub-agent names to intent names (e.g. {"pii_detector": "pii"}).
+        default_intent:   Intent when no sub-agent is triggered. Default: "safe".
+        fallback_action:  Action to take if verification fails. Default: "escalate".
+    """
 
     def __init__(
         self,
@@ -157,6 +65,8 @@ class OrchestratorWeaver:
         planner_agent: TemplatePlannerAgent,
         verifier_agent: BasicVerifierAgent,
         retriever: KnowledgeBaseRetriever,
+        intent_map: dict[str, str],
+        default_intent: str = "safe",
         fallback_action: str = "escalate",
         fallback_response: str = "Guardrail verification failed; route to review.",
     ) -> None:
@@ -165,15 +75,10 @@ class OrchestratorWeaver:
         self.planner_agent = planner_agent
         self.verifier_agent = verifier_agent
         self.retriever = retriever
+        self.intent_map = intent_map
+        self.default_intent = default_intent
         self.fallback_action = fallback_action
         self.fallback_response = fallback_response
-
-        self._INTENT_MAP = {
-            "pii_detector": "pii",
-            "safety_checker": "unsafe_prompt",
-            "external_send_detector": "external_send",
-            "tone_guard": "unsafe_prompt",
-        }
 
         builder = StateGraph(OrchestratorState)
         builder.add_node("run_sub_agent", self._run_sub_agent_node)
@@ -213,16 +118,16 @@ class OrchestratorWeaver:
         total_risk = min(3, 1 + sum(f.risk_delta for f in triggered))
 
         if triggered:
-            intent = self._INTENT_MAP.get(triggered[0].name, "general")
+            intent = self.intent_map.get(triggered[0].name, "general")
             tags = tuple(f.name for f in triggered)
         else:
-            intent = "safe"
+            intent = self.default_intent
             tags = ()
 
         signal = Signal(intent=intent, risk=total_risk, tags=tags)
         audit = list(state.get("audit_trail") or [])
 
-        # Match exact old audit formatting
+        # Match exact audit formatting
         for f in findings:
             audit.append(
                 f"sub_agent:{f.name}:triggered={f.triggered}"

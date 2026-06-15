@@ -69,13 +69,13 @@ gantry/
 │   ├── scenarios.py       # Registry/Builders mapping use cases to graph weavers
 │   ├── cli.py             # CLI runner supporting --stream, --resume, and --planner
 │   └── patterns/          # LangGraph StateGraph weavers
-│       ├── pipeline.py        # PipelineWeaver
-│       ├── orchestrator.py    # OrchestratorWeaver
-│       ├── fraud.py           # FraudOrchestratorWeaver + 5 specialist sub-agents
-│       ├── router.py          # RouterWeaver
-│       ├── reflection.py      # ReflectionWeaver + CriticAgent
-│       ├── hitl.py            # HumanInTheLoopWeaver (with SqliteSaver checkpointer)
-│       └── plan_execute.py    # PlanExecuteWeaver
+│       ├── pipeline.py            # PipelineWeaver
+│       ├── orchestrator.py        # OrchestratorWeaver (Guardrails)
+│       ├── parallel_orchestrator.py # ParallelOrchestratorWeaver (Fraud)
+│       ├── router.py              # RouterWeaver
+│       ├── reflection.py          # ReflectionWeaver + CriticAgent
+│       ├── hitl.py                # HumanInTheLoopWeaver (with SqliteSaver checkpointer)
+│       └── plan_execute.py        # PlanExecuteWeaver
 ├── examples/              # Knowledge bases (*.md) and task scenarios (*.json)
 ├── tests/                 # Unit tests (test_claim_weaver.py, test_hitl_langgraph.py)
 └── pyproject.toml         # Declared dependencies and build metadata

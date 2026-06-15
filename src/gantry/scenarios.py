@@ -22,27 +22,14 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .generic_agents import BasicVerifierAgent, KeywordSignalAgent, RulePolicyAgent, TemplatePlannerAgent
-from .models import AgentRecipe
+from .models import AgentRecipe, SubAgentFinding, FraudFinding, Task, Plan
 from .patterns.pipeline import PipelineWeaver
 from .patterns.hitl import HumanInTheLoopWeaver
-from .patterns.orchestrator import (
-    ExternalSendSubAgent,
-    OrchestratorWeaver,
-    PIISubAgent,
-    SafetySubAgent,
-    ToneSubAgent,
-)
+from .patterns.orchestrator import OrchestratorWeaver
+from .patterns.parallel_orchestrator import ParallelOrchestratorWeaver
 from .patterns.plan_execute import PlanExecuteWeaver
 from .patterns.reflection import CriticAgent, ReflectionWeaver
 from .patterns.router import RouterWeaver, SpecialistAgent
-from .patterns.fraud import (
-    FraudOrchestratorWeaver,
-    CardFraudSubAgent,
-    AccountTakeoverSubAgent,
-    SyntheticIdentitySubAgent,
-    VelocitySubAgent,
-    GeoRiskSubAgent,
-)
 from .retrieval import KnowledgeBaseRetriever
 
 
@@ -181,7 +168,7 @@ def _fraud_weaver(
     use_case: str,
     retriever: KnowledgeBaseRetriever,
     planner_agent: Optional[Any] = None,
-) -> FraudOrchestratorWeaver:
+) -> ParallelOrchestratorWeaver:
     return fraud_harness(retriever, planner_agent=planner_agent)
 
 
@@ -310,6 +297,109 @@ def coding_recipe() -> AgentRecipe:
 # Non-pipeline harnesses
 # ---------------------------------------------------------------------------
 
+class PIISubAgent:
+    """Detects personally identifiable information."""
+
+    name: str = "pii_detector"
+    keywords: tuple[str, ...] = (
+        "ssn",
+        "credit card",
+        "passport",
+        "phone number",
+        "date of birth",
+        "bank account",
+        "social security",
+    )
+
+    def run(self, task: Task) -> SubAgentFinding:
+        text = task.text.lower()
+        matches = [k for k in self.keywords if k in text]
+        triggered = bool(matches)
+        return SubAgentFinding(
+            name=self.name,
+            triggered=triggered,
+            reason=f"PII detected: {', '.join(matches)}" if matches else "No PII detected.",
+            risk_delta=2 if triggered else 0,
+        )
+
+
+class SafetySubAgent:
+    """Detects unsafe prompt patterns and jailbreak attempts."""
+
+    name: str = "safety_checker"
+    keywords: tuple[str, ...] = (
+        "ignore previous",
+        "jailbreak",
+        "bypass policy",
+        "ignore instructions",
+        "act as",
+        "pretend you are",
+        "disregard",
+    )
+
+    def run(self, task: Task) -> SubAgentFinding:
+        text = task.text.lower()
+        matches = [k for k in self.keywords if k in text]
+        triggered = bool(matches)
+        return SubAgentFinding(
+            name=self.name,
+            triggered=triggered,
+            reason=f"Unsafe prompt pattern detected: {', '.join(matches)}" if matches else "No unsafe patterns.",
+            risk_delta=3 if triggered else 0,
+        )
+
+
+class ExternalSendSubAgent:
+    """Detects attempts to send data outside the system."""
+
+    name: str = "external_send_detector"
+    keywords: tuple[str, ...] = (
+        "email customer",
+        "post publicly",
+        "send outside",
+        "forward to",
+        "share with",
+        "send to external",
+    )
+
+    def run(self, task: Task) -> SubAgentFinding:
+        text = task.text.lower()
+        matches = [k for k in self.keywords if k in text]
+        triggered = bool(matches)
+        return SubAgentFinding(
+            name=self.name,
+            triggered=triggered,
+            reason=f"External data send attempt: {', '.join(matches)}" if matches else "No external send detected.",
+            risk_delta=2 if triggered else 0,
+        )
+
+
+class ToneSubAgent:
+    """Detects hostile or threatening language."""
+
+    name: str = "tone_guard"
+    keywords: tuple[str, ...] = (
+        "threat",
+        "sue",
+        "lawyer",
+        "hate",
+        "destroy",
+        "attack",
+        "burn",
+    )
+
+    def run(self, task: Task) -> SubAgentFinding:
+        text = task.text.lower()
+        matches = [k for k in self.keywords if k in text]
+        triggered = bool(matches)
+        return SubAgentFinding(
+            name=self.name,
+            triggered=triggered,
+            reason=f"Hostile tone detected: {', '.join(matches)}" if matches else "Tone acceptable.",
+            risk_delta=1 if triggered else 0,
+        )
+
+
 def guardrail_harness(retriever: KnowledgeBaseRetriever, planner_agent: Optional[Any] = None) -> OrchestratorWeaver:
     """Guardrails — Orchestrator + Sub-agents pattern.
 
@@ -349,6 +439,13 @@ def guardrail_harness(retriever: KnowledgeBaseRetriever, planner_agent: Optional
         ),
         verifier_agent=BasicVerifierAgent(),
         retriever=retriever,
+        intent_map={
+            "pii_detector": "pii",
+            "safety_checker": "unsafe_prompt",
+            "external_send_detector": "external_send",
+            "tone_guard": "unsafe_prompt",
+        },
+        default_intent="safe",
         fallback_action="escalate",
         fallback_response="Guardrail verification failed; route to review.",
     )
@@ -568,8 +665,327 @@ def finance_harness(retriever: KnowledgeBaseRetriever, planner_agent: Optional[A
     )
 
 
-def fraud_harness(retriever: KnowledgeBaseRetriever, planner_agent: Optional[Any] = None) -> FraudOrchestratorWeaver:
-    """Fraud Detection — FraudOrchestratorWeaver + 5 specialist sub-agents.
+def _score_to_action(risk_score: int) -> str:
+    """Map a sub-agent risk score to a recommended action."""
+    if risk_score >= 3:
+        return "freeze_account"
+    if risk_score == 2:
+        return "block_transaction"
+    if risk_score == 1:
+        return "challenge_user"
+    return "allow"
+
+
+class CardFraudSubAgent:
+    """Detects payment card fraud signals."""
+
+    name: str = "card_fraud_detector"
+    high_amount_threshold: float = 5000.0
+    keywords: tuple[str, ...] = (
+        "card not present",
+        "multiple cards",
+        "declined then approved",
+        "chargeback",
+        "stolen card",
+        "card cloning",
+        "skimming",
+        "cvv mismatch",
+        "card testing",
+    )
+
+    def run(self, task: Task) -> FraudFinding:
+        text = task.text.lower()
+        keyword_hits = [k for k in self.keywords if k in text]
+        amount = float(task.metadata.get("amount_usd", 0))
+        high_amount = amount > self.high_amount_threshold
+
+        triggered = bool(keyword_hits) or high_amount
+        risk_score = 0
+        reasons: list[str] = []
+
+        if keyword_hits:
+            risk_score += 2
+            reasons.append(f"Card fraud keywords: {', '.join(keyword_hits)}")
+        if high_amount:
+            risk_score += 1
+            reasons.append(f"High transaction amount: ${amount:,.2f}")
+
+        risk_score = min(risk_score, 3)
+        action = _score_to_action(risk_score)
+
+        return FraudFinding(
+            name=self.name,
+            triggered=triggered,
+            fraud_type="payment_card_fraud",
+            reason="; ".join(reasons) if reasons else "No card fraud signals detected.",
+            risk_score=risk_score,
+            recommended_action=action,
+        )
+
+
+class AccountTakeoverSubAgent:
+    """Detects Account Takeover (ATO) signals."""
+
+    name: str = "ato_detector"
+    keywords: tuple[str, ...] = (
+        "password reset",
+        "login attempt",
+        "new device",
+        "credential",
+        "session hijack",
+        "unauthorized access",
+        "account locked",
+        "multiple failed login",
+        "suspicious login",
+        "device change",
+    )
+
+    def run(self, task: Task) -> FraudFinding:
+        text = task.text.lower()
+        keyword_hits = [k for k in self.keywords if k in text]
+        device_mismatch = not bool(task.metadata.get("device_fingerprint_match", True))
+        recent_password_reset = bool(task.metadata.get("recent_password_reset", False))
+
+        triggered = bool(keyword_hits) or device_mismatch or recent_password_reset
+        risk_score = 0
+        reasons: list[str] = []
+
+        if keyword_hits:
+            risk_score += 2
+            reasons.append(f"ATO signals: {', '.join(keyword_hits)}")
+        if device_mismatch:
+            risk_score += 2
+            reasons.append("Device fingerprint mismatch detected.")
+        if recent_password_reset:
+            risk_score += 1
+            reasons.append("Recent password reset before high-value transaction.")
+
+        risk_score = min(risk_score, 3)
+        action = _score_to_action(risk_score)
+
+        return FraudFinding(
+            name=self.name,
+            triggered=triggered,
+            fraud_type="account_takeover",
+            reason="; ".join(reasons) if reasons else "No ATO signals detected.",
+            risk_score=risk_score,
+            recommended_action=action,
+        )
+
+
+class SyntheticIdentitySubAgent:
+    """Detects synthetic identity fraud signals."""
+
+    name: str = "synthetic_identity_detector"
+    new_account_days_threshold: int = 30
+    new_account_high_amount: float = 1000.0
+    keywords: tuple[str, ...] = (
+        "synthetic identity",
+        "fake identity",
+        "fabricated",
+        "identity mismatch",
+        "ssn mismatch",
+        "address mismatch",
+        "multiple identities",
+        "bust out",
+        "credit washing",
+    )
+
+    def run(self, task: Task) -> FraudFinding:
+        text = task.text.lower()
+        keyword_hits = [k for k in self.keywords if k in text]
+        account_age = int(task.metadata.get("account_age_days", 999))
+        amount = float(task.metadata.get("amount_usd", 0))
+
+        new_account_high_tx = (
+            account_age < self.new_account_days_threshold
+            and amount > self.new_account_high_amount
+        )
+
+        triggered = bool(keyword_hits) or new_account_high_tx
+        risk_score = 0
+        reasons: list[str] = []
+
+        if keyword_hits:
+            risk_score += 2
+            reasons.append(f"Synthetic identity keywords: {', '.join(keyword_hits)}")
+        if new_account_high_tx:
+            reasons.append(
+                f"New account ({account_age}d old) attempting high-value "
+                f"transaction (${amount:,.2f})."
+            )
+            risk_score += 2
+
+        risk_score = min(risk_score, 3)
+        action = _score_to_action(risk_score)
+
+        return FraudFinding(
+            name=self.name,
+            triggered=triggered,
+            fraud_type="synthetic_identity",
+            reason="; ".join(reasons) if reasons else "No synthetic identity signals detected.",
+            risk_score=risk_score,
+            recommended_action=action,
+        )
+
+
+class VelocitySubAgent:
+    """Detects transaction velocity abuse."""
+
+    name: str = "velocity_checker"
+    velocity_threshold_1h: int = 5
+    velocity_threshold_10min: int = 3
+
+    def run(self, task: Task) -> FraudFinding:
+        tx_1h = int(task.metadata.get("transaction_count_1h", 0))
+        tx_10min = int(task.metadata.get("transaction_count_10min", 0))
+
+        high_velocity_1h = tx_1h >= self.velocity_threshold_1h
+        high_velocity_10min = tx_10min >= self.velocity_threshold_10min
+
+        triggered = high_velocity_1h or high_velocity_10min
+        risk_score = 0
+        reasons: list[str] = []
+
+        if high_velocity_10min:
+            risk_score += 3
+            reasons.append(f"Critical velocity: {tx_10min} transactions in last 10 minutes.")
+        elif high_velocity_1h:
+            risk_score += 2
+            reasons.append(f"High velocity: {tx_1h} transactions in last hour.")
+
+        risk_score = min(risk_score, 3)
+        action = _score_to_action(risk_score)
+
+        return FraudFinding(
+            name=self.name,
+            triggered=triggered,
+            fraud_type="velocity_abuse",
+            reason="; ".join(reasons) if reasons else f"Velocity normal ({tx_1h}/h, {tx_10min}/10min).",
+            risk_score=risk_score,
+            recommended_action=action,
+        )
+
+
+class GeoRiskSubAgent:
+    """Detects geographic risk signals."""
+
+    name: str = "geo_risk_detector"
+    high_risk_countries: tuple[str, ...] = (
+        "ng", "gh", "ro", "ru", "ua", "cn", "id",
+    )
+    high_risk_keywords: tuple[str, ...] = (
+        "impossible travel",
+        "location mismatch",
+        "vpn detected",
+        "tor exit",
+        "proxy detected",
+        "high risk country",
+        "sanctioned country",
+    )
+
+    def run(self, task: Task) -> FraudFinding:
+        text = task.text.lower()
+        keyword_hits = [k for k in self.high_risk_keywords if k in text]
+        country = str(task.metadata.get("country_code", "")).lower()
+        high_risk_country = country in self.high_risk_countries
+        impossible_travel = bool(task.metadata.get("impossible_travel", False))
+
+        triggered = bool(keyword_hits) or high_risk_country or impossible_travel
+        risk_score = 0
+        reasons: list[str] = []
+
+        if keyword_hits:
+            risk_score += 2
+            reasons.append(f"Geo risk keywords: {', '.join(keyword_hits)}")
+        if high_risk_country:
+            risk_score += 1
+            reasons.append(f"Transaction from high-risk country: {country.upper()}.")
+        if impossible_travel:
+            risk_score += 3
+            reasons.append("Impossible travel detected: two locations too far apart in time.")
+
+        risk_score = min(risk_score, 3)
+        action = _score_to_action(risk_score)
+
+        return FraudFinding(
+            name=self.name,
+            triggered=triggered,
+            fraud_type="geo_risk",
+            reason="; ".join(reasons) if reasons else "No geo risk detected.",
+            risk_score=risk_score,
+            recommended_action=action,
+        )
+
+
+def _aggregate_fraud_findings(findings: list[FraudFinding]) -> tuple[str, int, list[str], list[str]]:
+    audit = []
+    for f in findings:
+        audit.append(
+            f"sub_agent:{f.name}:triggered={f.triggered}"
+            f":risk_score={f.risk_score}"
+            f":fraud_type={f.fraud_type}"
+            f":reason={f.reason}"
+        )
+
+    composite_score = sum(f.risk_score for f in findings)
+    triggered_findings = [f for f in findings if f.triggered]
+    fraud_types = list(dict.fromkeys(f.fraud_type for f in triggered_findings))
+
+    audit.append(
+        f"composite_fraud_score:{composite_score}"
+        f":sub_agents_triggered={len(triggered_findings)}/{len(findings)}"
+        f":fraud_types={','.join(fraud_types) or 'none'}"
+    )
+
+    if composite_score >= 9:
+        intent = "freeze_account"
+    elif composite_score >= 6:
+        intent = "block_transaction"
+    elif composite_score >= 4:
+        intent = "flag_for_review"
+    elif composite_score >= 2:
+        intent = "challenge_user"
+    else:
+        intent = "allow"
+
+    risk = min(3, 1 + len(triggered_findings))
+    return intent, risk, fraud_types, audit
+
+
+def _enrich_fraud_plan(draft: Plan, findings: list[Any]) -> Plan:
+    composite_score = sum(f.risk_score for f in findings)
+    triggered_findings = [f for f in findings if f.triggered]
+
+    if triggered_findings:
+        fraud_summary = "; ".join(
+            f"{f.fraud_type}(score={f.risk_score})" for f in triggered_findings
+        )
+        return Plan(
+            action=draft.action,
+            confidence=draft.confidence,
+            response=draft.response,
+            internal_note=(
+                f"{draft.internal_note} | composite_score={composite_score} "
+                f"| fraud_signals=[{fraud_summary}]"
+            ),
+            citations=draft.citations,
+        )
+    return draft
+
+
+def _initial_fraud_audit(task: Task) -> list[str]:
+    return [
+        f"task:{task.id}:received",
+        f"use_case:{task.use_case}",
+        "pattern:fraud_orchestrator",
+        f"amount_usd:{task.metadata.get('amount_usd', 'unknown')}",
+        f"account_age_days:{task.metadata.get('account_age_days', 'unknown')}",
+    ]
+
+
+def fraud_harness(retriever: KnowledgeBaseRetriever, planner_agent: Optional[Any] = None) -> ParallelOrchestratorWeaver:
+    """Fraud Detection — ParallelOrchestratorWeaver + 5 specialist sub-agents.
 
     Five sub-agents run in parallel, each checking one fraud dimension:
     - CardFraudSubAgent       : payment card fraud, card-not-present, skimming
@@ -588,7 +1004,7 @@ def fraud_harness(retriever: KnowledgeBaseRetriever, planner_agent: Optional[Any
     To add a new fraud dimension: create a sub-agent with
     run(task) -> FraudFinding and add it to sub_agents.
     """
-    return FraudOrchestratorWeaver(
+    return ParallelOrchestratorWeaver(
         sub_agents=(
             CardFraudSubAgent(),
             AccountTakeoverSubAgent(),
@@ -619,10 +1035,9 @@ def fraud_harness(retriever: KnowledgeBaseRetriever, planner_agent: Optional[Any
         ),
         verifier_agent=BasicVerifierAgent(),
         retriever=retriever,
-        challenge_threshold=2,
-        flag_threshold=4,
-        block_threshold=6,
-        freeze_threshold=9,
+        aggregation_policy=_aggregate_fraud_findings,
+        plan_enrichment_fn=_enrich_fraud_plan,
+        initial_audit_fn=_initial_fraud_audit,
         fallback_action="flag_for_review",
         fallback_response="Fraud check inconclusive; routing to analyst queue.",
     )

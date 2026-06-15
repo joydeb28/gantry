@@ -16,28 +16,17 @@ Available patterns:
 """
 
 from .pipeline import PipelineWeaver
-from .orchestrator import OrchestratorWeaver, PIISubAgent, SafetySubAgent, ExternalSendSubAgent, ToneSubAgent, SubAgentFinding
+from .orchestrator import OrchestratorWeaver, SubAgentFinding
+from .parallel_orchestrator import ParallelOrchestratorWeaver
 from .router import RouterWeaver, SpecialistAgent
 from .reflection import ReflectionWeaver, CriticAgent, Critique
 from .hitl import HumanInTheLoopWeaver, CHECKPOINT_ACTION
 from .plan_execute import PlanExecuteWeaver, ExecutionStep
-from .fraud import (
-    FraudOrchestratorWeaver,
-    FraudFinding,
-    CardFraudSubAgent,
-    AccountTakeoverSubAgent,
-    SyntheticIdentitySubAgent,
-    VelocitySubAgent,
-    GeoRiskSubAgent,
-)
 
 __all__ = [
     "PipelineWeaver",
     "OrchestratorWeaver",
-    "PIISubAgent",
-    "SafetySubAgent",
-    "ExternalSendSubAgent",
-    "ToneSubAgent",
+    "ParallelOrchestratorWeaver",
     "SubAgentFinding",
     "RouterWeaver",
     "SpecialistAgent",
@@ -48,11 +37,4 @@ __all__ = [
     "CHECKPOINT_ACTION",
     "PlanExecuteWeaver",
     "ExecutionStep",
-    "FraudOrchestratorWeaver",
-    "FraudFinding",
-    "CardFraudSubAgent",
-    "AccountTakeoverSubAgent",
-    "SyntheticIdentitySubAgent",
-    "VelocitySubAgent",
-    "GeoRiskSubAgent",
 ]
