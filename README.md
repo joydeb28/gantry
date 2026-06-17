@@ -1,8 +1,9 @@
 # Gantry
+<p align="center">
+  <img src="assets/gantry-banner.png" alt="Gantry - Composable Agentic Patterns for Production AI" width="100%">
+</p>
 
-> **Seven production-grade agentic patterns. Ten real-world use cases. Orchestrated with LangGraph, LangChain, LlamaIndex, and Pydantic v2.**
-
-`gantry` is a production-ready Python toolkit for building **agentic AI systems** using established orchestration patterns. Every use case runs with the pattern best suited to its domain — from a simple sequential pipeline to a cyclic reflection critic loop or human-in-the-loop workflow.
+`gantry` is a Python toolkit for building **agentic AI systems** using established orchestration patterns. Every use case runs with the pattern best suited to its domain — from a simple sequential pipeline to a cyclic reflection critic loop or human-in-the-loop workflow.
 
 ---
 
@@ -63,22 +64,26 @@ All patterns are implemented as LangGraph `StateGraph` workflows compiled into w
 gantry/
 ├── src/gantry/
 │   ├── models.py          # Pydantic v2 data models: Task, Signal, Evidence, Outcome, etc.
-│   ├── generic_agents.py  # Agent components: KeywordSignalAgent, RulePolicyAgent, etc.
-│   ├── retrieval.py       # KnowledgeBaseRetriever — Vector RAG backed by LlamaIndex + HuggingFace
-│   ├── llm.py             # LangChain planners (ChatOllama + structured output)
+│   ├── generic_agents.py  # KeywordSignalAgent, SemanticSignalAgent, RulePolicyAgent,
+│   │                      # TemplatePlannerAgent, BasicVerifierAgent, safe_node()
+│   ├── retrieval.py       # BaseRetriever protocol, KnowledgeBaseRetriever (filesystem),
+│   │                      # RemoteRetriever (in-memory, for external content sources)
+│   ├── llm.py             # Multi-provider LangChain planner: ollama, openai, gemini,
+│   │                      # anthropic, vllm — all via build_llm() factory
 │   ├── scenarios.py       # Registry/Builders mapping use cases to graph weavers
-│   ├── cli.py             # CLI runner supporting --stream, --resume, and --planner
+│   ├── cli.py             # CLI runner: --stream, --resume, --planner, --trace,
+│   │                      # --checkpoint-backend
 │   └── patterns/          # LangGraph StateGraph weavers
 │       ├── pipeline.py            # PipelineWeaver
 │       ├── orchestrator.py        # OrchestratorWeaver (Guardrails)
 │       ├── parallel_orchestrator.py # ParallelOrchestratorWeaver (Fraud)
 │       ├── router.py              # RouterWeaver
 │       ├── reflection.py          # ReflectionWeaver + CriticAgent
-│       ├── hitl.py                # HumanInTheLoopWeaver (with SqliteSaver checkpointer)
+│       ├── hitl.py                # HumanInTheLoopWeaver (SQLite + PostgreSQL checkpointer)
 │       └── plan_execute.py        # PlanExecuteWeaver
 ├── examples/              # Knowledge bases (*.md) and task scenarios (*.json)
 ├── tests/                 # Unit tests (test_claim_weaver.py, test_hitl_langgraph.py)
-└── pyproject.toml         # Declared dependencies and build metadata
+└── pyproject.toml         # Dependencies and optional-dep groups per LLM provider
 ```
 
 ---
@@ -106,11 +111,50 @@ This saves state checkpoints to SQLite. To resume the workflow:
 gantry --use-case hr --resume HR-1001
 ```
 
-### LLM-powered Planning (LangChain)
-To swap the rule-based planner for a local Ollama reasoning model:
+### LLM-powered Planning
+Swap the rule-based planner for any supported LLM provider:
 ```bash
-# Make sure Ollama is running with qwen3:4b
-gantry --use-case support --task examples/support/task_replacement.json --planner ollama --model-profile qwen3:4b
+# Local Ollama model (no API key required)
+gantry --use-case support --task examples/support/task_replacement.json \
+  --planner ollama --model-profile qwen3:4b
+
+# OpenAI (requires OPENAI_API_KEY + pip install "gantry[openai]")
+gantry --use-case support --task examples/support/task_replacement.json \
+  --planner openai --model-profile gpt-4o-mini
+
+# Gemini (requires GOOGLE_API_KEY + pip install "gantry[gemini]")
+gantry --use-case fraud --task examples/fraud/task_card_fraud.json \
+  --planner gemini --model-profile gemini-2.0-flash
+
+# Anthropic (requires ANTHROPIC_API_KEY + pip install "gantry[anthrop]")
+gantry --use-case legal --task examples/legal/task_contract_review.json \
+  --planner anthropic
+```
+
+### Observability — LangSmith Tracing
+```bash
+export LANGCHAIN_API_KEY=lsv2_...
+gantry --use-case fraud --task examples/fraud/task_card_fraud.json --trace
+# Sets LANGCHAIN_TRACING_V2=true and LANGCHAIN_PROJECT=gantry automatically
+```
+
+### PostgreSQL Checkpointer (Production HITL)
+```bash
+export DATABASE_URL=postgresql://user:pass@localhost/gantry
+gantry --use-case hr --task examples/hr/task_onboarding.json \
+  --checkpoint-backend postgres
+```
+
+---
+
+## Installing LLM Provider Extras
+
+```bash
+pip install "gantry[openai]"         # OpenAI (langchain-openai)
+pip install "gantry[gemini]"         # Gemini (langchain-google-genai)
+pip install "gantry[anthrop]"        # Anthropic (langchain-anthropic)
+pip install "gantry[all-providers]"  # All three cloud providers
+pip install "gantry[prod]"           # HITL persistence: SQLite + PostgreSQL
 ```
 
 ---
@@ -126,10 +170,14 @@ gantry --use-case support --task examples/support/task_replacement.json --planne
 
 ## Design Principles
 
-- **Framework Orchestration**: Leveraging LangGraph for clean state transition graphs and state management.
-- **Type Safety**: Pydantic v2 enforces schemas and handles JSON serialization.
-- **Semantic Retrieval**: LlamaIndex and local HuggingFace embeddings provide vector RAG out of the box.
-- **State Audits**: Workflows compile audit logs throughout execution.
+- **Framework Orchestration**: LangGraph `StateGraph` for clean state transitions; every node is wrapped with `safe_node()` for graceful error recovery.
+- **Type Safety**: Pydantic v2 enforces schemas and handles JSON serialization across all models.
+- **Multi-Provider LLM**: `build_llm()` factory supports Ollama, OpenAI, Gemini, Anthropic, and vLLM — swap with a single flag.
+- **Semantic Retrieval**: `KnowledgeBaseRetriever` (filesystem) and `RemoteRetriever` (in-memory) both satisfy the `BaseRetriever` protocol; plug in Confluence, Notion, or any content source.
+- **Semantic Intent Detection**: `SemanticSignalAgent` uses `bge-small-en-v1.5` embeddings to handle natural-language paraphrasing — no keyword lists needed.
+- **Extensible Policy**: `RulePolicyAgent` accepts `custom_conditions` so domain-specific blocking logic can be injected without subclassing.
+- **Observability**: `--trace` enables zero-code LangSmith tracing; audit logs are written into every `Outcome`.
+- **Production Persistence**: HITL workflows support SQLite (dev) and PostgreSQL (production) checkpointers via `--checkpoint-backend`.
 
 ---
 

@@ -1,15 +1,29 @@
-"""LangChain LLM integration — ChatOllama + structured output.
+"""LangChain LLM integration — multi-provider structured output planning.
 
-Provides a LangChain-powered planner that uses a local Ollama model
-(default: qwen3:4b) to generate typed Plan objects via structured output.
+Provides a LangChain-powered planner that calls an LLM and returns a typed
+Plan object via ``with_structured_output(Plan)``.
 
-The planner is used as a drop-in replacement for TemplatePlannerAgent in
-any LangGraph node that needs LLM-powered reasoning instead of rule-based
-template matching.
+Supported providers:
+    - ``ollama``    : Local Ollama server (default; no API key required)
+    - ``vllm``      : Local vLLM OpenAI-compatible server
+    - ``openai``    : OpenAI API (requires ``pip install langchain-openai``)
+    - ``gemini``    : Google Gemini API (requires ``pip install langchain-google-genai``)
+    - ``anthropic`` : Anthropic API (requires ``pip install langchain-anthropic``)
 
 Usage::
 
-    planner = LangChainPlanner(model="qwen3:4b")
+    # Ollama (no API key, local)
+    planner = LangChainPlanner(model="qwen3:4b", provider="ollama")
+
+    # OpenAI (requires OPENAI_API_KEY env var)
+    planner = LangChainPlanner(model="gpt-4o-mini", provider="openai")
+
+    # Gemini (requires GOOGLE_API_KEY env var)
+    planner = LangChainPlanner(model="gemini-2.0-flash", provider="gemini")
+
+    # Anthropic (requires ANTHROPIC_API_KEY env var)
+    planner = LangChainPlanner(model="claude-3-5-haiku-latest", provider="anthropic")
+
     plan = planner.plan(task, signal, evidence, policy)
     # Returns a fully validated Plan Pydantic object directly
 """
@@ -17,10 +31,11 @@ Usage::
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING
 
+from langchain_core.language_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_ollama import ChatOllama
 
 from .models import Evidence, Plan, PolicyDecision, Signal, Task
 
@@ -73,43 +88,178 @@ Produce a plan. Return valid JSON matching the Plan schema.
 
 
 # ---------------------------------------------------------------------------
+# Provider factory
+# ---------------------------------------------------------------------------
+
+_PROVIDER_INSTALL_HINTS: dict[str, str] = {
+    "openai":    "pip install langchain-openai",
+    "gemini":    "pip install langchain-google-genai",
+    "anthropic": "pip install langchain-anthropic",
+}
+
+_DEFAULT_MODELS: dict[str, str] = {
+    "ollama":    "qwen3:4b",
+    "vllm":      "Qwen/Qwen3-4B",
+    "openai":    "gpt-4o-mini",
+    "gemini":    "gemini-2.0-flash",
+    "anthropic": "claude-3-5-haiku-latest",
+}
+
+_DEFAULT_BASE_URLS: dict[str, str] = {
+    "ollama": "http://localhost:11434",
+    "vllm":   "http://localhost:8000/v1",
+}
+
+
+def build_llm(
+    provider: str,
+    model: str | None = None,
+    temperature: float = 0.3,
+    base_url: str | None = None,
+) -> BaseChatModel:
+    """Construct a LangChain ``BaseChatModel`` for the given provider.
+
+    Providers ``openai``, ``gemini``, and ``anthropic`` are lazily imported
+    so the corresponding package only needs to be installed when actually used.
+
+    Args:
+        provider:    One of ``ollama``, ``vllm``, ``openai``, ``gemini``, ``anthropic``.
+        model:       Model name. Falls back to a sensible default per provider.
+        temperature: Sampling temperature. Default: 0.3 (deterministic for planning).
+        base_url:    Override the API base URL (useful for proxies or local servers).
+
+    Returns:
+        A ``BaseChatModel`` instance ready for ``.with_structured_output(Plan)``.
+
+    Raises:
+        ImportError:  If the required provider package is not installed.
+        ValueError:   If an unknown provider is specified.
+    """
+    resolved_model = model or _DEFAULT_MODELS.get(provider, "")
+    resolved_url = base_url or _DEFAULT_BASE_URLS.get(provider)
+
+    if provider == "ollama":
+        from langchain_ollama import ChatOllama
+        return ChatOllama(
+            model=resolved_model,
+            temperature=temperature,
+            base_url=resolved_url or "http://localhost:11434",
+        )
+
+    if provider == "vllm":
+        # vLLM exposes an OpenAI-compatible endpoint; use langchain-openai
+        try:
+            from langchain_openai import ChatOpenAI
+        except ImportError as exc:
+            raise ImportError(
+                "vLLM requires the 'langchain-openai' package. "
+                "Install it with: pip install langchain-openai"
+            ) from exc
+        return ChatOpenAI(
+            model=resolved_model,
+            temperature=temperature,
+            base_url=resolved_url or "http://localhost:8000/v1",
+            api_key=os.environ.get("VLLM_API_KEY", "not-needed"),  # type: ignore[arg-type]
+        )
+
+    if provider == "openai":
+        try:
+            from langchain_openai import ChatOpenAI
+        except ImportError as exc:
+            raise ImportError(
+                f"OpenAI provider requires 'langchain-openai'. "
+                f"Install with: {_PROVIDER_INSTALL_HINTS['openai']}"
+            ) from exc
+        kwargs: dict = {"model": resolved_model, "temperature": temperature}
+        if resolved_url:
+            kwargs["base_url"] = resolved_url
+        return ChatOpenAI(**kwargs)
+
+    if provider == "gemini":
+        try:
+            from langchain_google_genai import ChatGoogleGenerativeAI
+        except ImportError as exc:
+            raise ImportError(
+                f"Gemini provider requires 'langchain-google-genai'. "
+                f"Install with: {_PROVIDER_INSTALL_HINTS['gemini']}"
+            ) from exc
+        return ChatGoogleGenerativeAI(
+            model=resolved_model,
+            temperature=temperature,
+        )
+
+    if provider == "anthropic":
+        try:
+            from langchain_anthropic import ChatAnthropic
+        except ImportError as exc:
+            raise ImportError(
+                f"Anthropic provider requires 'langchain-anthropic'. "
+                f"Install with: {_PROVIDER_INSTALL_HINTS['anthropic']}"
+            ) from exc
+        return ChatAnthropic(
+            model=resolved_model,  # type: ignore[call-arg]
+            temperature=temperature,
+        )
+
+    raise ValueError(
+        f"Unknown LLM provider '{provider}'. "
+        f"Choose one of: ollama, vllm, openai, gemini, anthropic."
+    )
+
+
+# ---------------------------------------------------------------------------
 # LangChain Planner
 # ---------------------------------------------------------------------------
 
 class LangChainPlanner:
-    """LLM-powered planner using ChatOllama + LangChain structured output.
+    """LLM-powered planner — any provider, structured output.
 
-    Calls a local Ollama model and returns a typed ``Plan`` object directly
+    Calls the configured LLM and returns a typed ``Plan`` object directly
     via ``with_structured_output(Plan)``. No manual JSON parsing required.
 
     Args:
-        model:       Ollama model name. Default: ``qwen3:4b``.
-        temperature: Sampling temperature. Default: 0.3 (deterministic for planning).
-        base_url:    Ollama API base URL. Default: ``http://localhost:11434``.
+        model:       Model name. Falls back to the provider default when omitted.
+        provider:    LLM provider. One of ``ollama``, ``vllm``, ``openai``,
+                     ``gemini``, ``anthropic``. Default: ``ollama``.
+        temperature: Sampling temperature. Default: 0.3.
+        base_url:    Override API base URL.
+        llm:         Pass a pre-built ``BaseChatModel`` directly to bypass the
+                     provider factory (useful for testing or custom models).
+
+    Example::
+
+        # Use OpenAI
+        planner = LangChainPlanner(provider="openai", model="gpt-4o-mini")
+
+        # Bring your own model instance
+        from langchain_openai import ChatOpenAI
+        planner = LangChainPlanner(llm=ChatOpenAI(model="gpt-4o"))
     """
 
     def __init__(
         self,
-        model: str = "qwen3:4b",
+        model: str | None = None,
+        provider: str = "ollama",
         temperature: float = 0.3,
-        base_url: str = "http://localhost:11434",
+        base_url: str | None = None,
+        llm: BaseChatModel | None = None,
     ) -> None:
-        llm = ChatOllama(
-            model=model,
-            temperature=temperature,
-            base_url=base_url,
-        )
-        # with_structured_output uses the Plan JSON schema to constrain output.
-        # Returns a Plan Pydantic object directly — no parsing needed.
-        structured_llm = llm.with_structured_output(Plan)
+        if llm is None:
+            llm = build_llm(
+                provider=provider,
+                model=model,
+                temperature=temperature,
+                base_url=base_url,
+            )
 
+        structured_llm = llm.with_structured_output(Plan)
         prompt = ChatPromptTemplate.from_messages([
             ("system", _SYSTEM_PROMPT),
             ("human", _HUMAN_TEMPLATE),
         ])
-
         self._chain = prompt | structured_llm
-        self._model = model
+        self._provider = provider
+        self._model = model or _DEFAULT_MODELS.get(provider, "unknown")
 
     def plan(
         self,
@@ -148,8 +298,8 @@ class LangChainPlanner:
         })
 
         logger.info(
-            "LangChain planner [%s] → action=%s confidence=%.2f",
-            self._model, plan.action, plan.confidence,
+            "LangChain planner [%s/%s] → action=%s confidence=%.2f",
+            self._provider, self._model, plan.action, plan.confidence,
         )
         return plan
 
@@ -168,4 +318,3 @@ class LangChainPlannerAgent:
         policy: PolicyDecision,
     ) -> Plan:
         return self.planner.plan(task, signal, evidence, policy)
-

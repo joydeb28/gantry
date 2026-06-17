@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any, Optional, TypedDict
 from langgraph.graph import StateGraph, START, END
 
-from ..generic_agents import BasicVerifierAgent, RulePolicyAgent, TemplatePlannerAgent
+from ..generic_agents import BasicVerifierAgent, RulePolicyAgent, TemplatePlannerAgent, safe_node
 from ..models import Evidence, Outcome, Plan, PolicyDecision, Signal, Task, Verification
 from ..retrieval import KnowledgeBaseRetriever
 
@@ -58,14 +58,14 @@ class RouterWeaver:
         self.fallback_response = fallback_response
 
         builder = StateGraph(RouterState)
-        builder.add_node("router", self._router_node)
-        builder.add_node("retrieve", self._retrieve_node)
-        
+        builder.add_node("router",   safe_node(self._router_node,   {"route": self.default_route, "audit_trail": ["router:error"]}))
+        builder.add_node("retrieve", safe_node(self._retrieve_node, {"evidence": (), "audit_trail": ["retrieve:error"]}))
+
         # Add dynamic specialist nodes
         for name in self.routes.keys():
-            builder.add_node(f"specialist_{name}", self._make_specialist_node(name))
+            builder.add_node(f"specialist_{name}", safe_node(self._make_specialist_node(name), {"audit_trail": [f"specialist_{name}:error"]}))
 
-        builder.add_node("verify", self._verify_node)
+        builder.add_node("verify",   safe_node(self._verify_node,   {"audit_trail": ["verify:error"]}))
         builder.add_node("finalize", self._finalize_node)
 
         builder.add_edge(START, "router")

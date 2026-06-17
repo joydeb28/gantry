@@ -10,7 +10,7 @@ from typing import Optional, TypedDict
 from pydantic import BaseModel, ConfigDict
 from langgraph.graph import StateGraph, START, END
 
-from ..generic_agents import BasicVerifierAgent, KeywordSignalAgent, RulePolicyAgent, TemplatePlannerAgent
+from ..generic_agents import BasicVerifierAgent, KeywordSignalAgent, RulePolicyAgent, TemplatePlannerAgent, safe_node
 from ..models import Evidence, Outcome, Plan, PolicyDecision, Signal, Task, Verification
 from ..retrieval import KnowledgeBaseRetriever
 
@@ -64,14 +64,14 @@ class PlanExecuteWeaver:
         self.fallback_response = fallback_response
 
         builder = StateGraph(PlanExecuteState)
-        builder.add_node("signal", self._signal_node)
-        builder.add_node("retrieve", self._retrieve_node)
-        builder.add_node("policy", self._policy_node)
-        builder.add_node("plan", self._plan_node)
-        builder.add_node("execute", self._execute_node)
-        builder.add_node("verify", self._verify_node)
-        builder.add_node("finalize", self._finalize_node)
-        builder.add_node("finalize_failed", self._finalize_failed_node)
+        builder.add_node("signal",          safe_node(self._signal_node,   {"audit_trail": ["signal:error"]}))
+        builder.add_node("retrieve",         safe_node(self._retrieve_node, {"evidence": (), "audit_trail": ["retrieve:error"]}))
+        builder.add_node("policy",           safe_node(self._policy_node,   {"audit_trail": ["policy:error"]}))
+        builder.add_node("plan",             safe_node(self._plan_node,     {"audit_trail": ["plan:error"]}))
+        builder.add_node("execute",          self._execute_node)
+        builder.add_node("verify",           safe_node(self._verify_node,   {"audit_trail": ["verify:error"]}))
+        builder.add_node("finalize",         self._finalize_node)
+        builder.add_node("finalize_failed",  self._finalize_failed_node)
 
         builder.add_edge(START, "signal")
         builder.add_edge("signal", "retrieve")

@@ -44,10 +44,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Production-grade HITL persistence (swap InMemorySaver)
+# Production-grade HITL persistence
 prod = [
     "langgraph-checkpoint-sqlite",
     "langgraph-checkpoint-postgres",
+]
+# LLM provider extras — install only the one you use
+openai    = ["langchain-openai>=0.3"]
+gemini    = ["langchain-google-genai>=3.0"]
+anthrop   = ["langchain-anthropic>=0.3"]
+# All providers bundled
+all-providers = [
+    "langchain-openai>=0.3",
+    "langchain-google-genai>=3.0",
+    "langchain-anthropic>=0.3",
 ]
 dev = [
     "pytest>=8",

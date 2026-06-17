@@ -1,20 +1,29 @@
 """Human-in-the-Loop (HITL) Pattern — LangGraph StateGraph implementation.
 
 Pauses execution using LangGraph's native interrupt() mechanism at the approval gate
-for intents requiring human sign-off. Uses SqliteSaver for process-persistent state checkpoints.
+for intents requiring human sign-off.
+
+Checkpoint backends:
+    - ``sqlite``   (default) : Persists to ``.gantry_checkpoints.db`` in the working dir.
+    - ``postgres`` : Reads ``DATABASE_URL`` env var (e.g. postgresql://user:pass@host/db).
+                     Requires ``langgraph-checkpoint-postgres`` (installed with the [prod] extra).
 """
 
 from __future__ import annotations
 
+import logging
+import os
 import sqlite3
 from typing import Any, Optional, TypedDict
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import interrupt
 
-from ..generic_agents import BasicVerifierAgent, KeywordSignalAgent, RulePolicyAgent, TemplatePlannerAgent
+from ..generic_agents import BasicVerifierAgent, KeywordSignalAgent, RulePolicyAgent, TemplatePlannerAgent, safe_node
 from ..models import Evidence, Outcome, Plan, PolicyDecision, Signal, Task, Verification
 from ..retrieval import KnowledgeBaseRetriever
+
+logger = logging.getLogger(__name__)
 
 CHECKPOINT_ACTION = "pending_approval"
 
@@ -31,8 +40,60 @@ class HITLState(TypedDict):
     audit_trail: list[str]
 
 
+def _build_checkpointer(backend: str, db_url: str | None = None) -> Any:
+    """Construct a LangGraph checkpointer for the given backend.
+
+    Args:
+        backend: ``"sqlite"`` or ``"postgres"``.
+        db_url:  Database URL. For postgres, reads ``DATABASE_URL`` env var if omitted.
+
+    Returns:
+        A LangGraph checkpointer instance.
+    """
+    if backend == "postgres":
+        resolved_url = db_url or os.environ.get("DATABASE_URL", "")
+        if not resolved_url:
+            raise ValueError(
+                "PostgreSQL checkpointer requires a database URL. "
+                "Set the DATABASE_URL environment variable or pass db_url explicitly.\n"
+                "Example: DATABASE_URL=postgresql://user:pass@localhost/gantry"
+            )
+        try:
+            from langgraph.checkpoint.postgres import PostgresSaver
+            conn = PostgresSaver.from_conn_string(resolved_url)
+            conn.setup()  # creates tables if they don't exist
+            logger.info("HITL: using PostgreSQL checkpointer at %s", resolved_url.split("@")[-1])
+            return conn
+        except ImportError as exc:
+            raise ImportError(
+                "PostgreSQL checkpointer requires 'langgraph-checkpoint-postgres'. "
+                "Install with: pip install 'gantry[prod]'"
+            ) from exc
+
+    # Default: SQLite
+    conn = sqlite3.connect(".gantry_checkpoints.db", check_same_thread=False)
+    logger.info("HITL: using SQLite checkpointer (.gantry_checkpoints.db)")
+    return SqliteSaver(conn)
+
+
 class HumanInTheLoopWeaver:
-    """Human-in-the-Loop (HITL) pattern using LangGraph StateGraph."""
+    """Human-in-the-Loop (HITL) pattern using LangGraph StateGraph.
+
+    Args:
+        signal_agent:              Intent + risk extraction agent.
+        policy_agent:              Action gating policy agent.
+        planner_agent:             Draft plan generation agent.
+        verifier_agent:            Plan verification agent.
+        retriever:                 Knowledge base retriever.
+        approval_required_intents: Intents that trigger the HITL checkpoint.
+        fallback_action:           Action when workflow is rejected/fails.
+        fallback_response:         Response text for the fallback action.
+        checkpointer:              Pre-built LangGraph checkpointer. If None,
+                                   uses ``checkpoint_backend`` to build one.
+        checkpoint_backend:        ``"sqlite"`` (default) or ``"postgres"``.
+        db_url:                    DB URL for postgres backend. Reads ``DATABASE_URL``
+                                   env var if not provided.
+    """
 
     def __init__(
         self,
@@ -45,6 +106,8 @@ class HumanInTheLoopWeaver:
         fallback_action: str = "escalate",
         fallback_response: str = "Workflow failed after human approval; escalating.",
         checkpointer: Optional[Any] = None,
+        checkpoint_backend: str = "sqlite",
+        db_url: str | None = None,
     ) -> None:
         self.signal_agent = signal_agent
         self.policy_agent = policy_agent
@@ -56,18 +119,16 @@ class HumanInTheLoopWeaver:
         self.fallback_response = fallback_response
 
         if checkpointer is None:
-            # Persistent checkpointer by default so CLI commands can resume across runs
-            conn = sqlite3.connect(".gantry_checkpoints.db", check_same_thread=False)
-            checkpointer = SqliteSaver(conn)
+            checkpointer = _build_checkpointer(checkpoint_backend, db_url)
         self.checkpointer = checkpointer
 
         builder = StateGraph(HITLState)
-        builder.add_node("signal", self._signal_node)
-        builder.add_node("retrieve", self._retrieve_node)
-        builder.add_node("policy", self._policy_node)
-        builder.add_node("gate", self._approval_gate_node)
-        builder.add_node("plan", self._plan_node)
-        builder.add_node("verify", self._verify_node)
+        builder.add_node("signal",   safe_node(self._signal_node,   {"audit_trail": ["signal:error"]}))
+        builder.add_node("retrieve", safe_node(self._retrieve_node, {"evidence": (), "audit_trail": ["retrieve:error"]}))
+        builder.add_node("policy",   safe_node(self._policy_node,   {"audit_trail": ["policy:error"]}))
+        builder.add_node("gate",     self._approval_gate_node)  # cannot safe_node — uses interrupt()
+        builder.add_node("plan",     safe_node(self._plan_node,     {"audit_trail": ["plan:error"]}))
+        builder.add_node("verify",   safe_node(self._verify_node,   {"audit_trail": ["verify:error"]}))
         builder.add_node("finalize", self._finalize_node)
         builder.add_node("finalize_rejected", self._finalize_rejected_node)
 

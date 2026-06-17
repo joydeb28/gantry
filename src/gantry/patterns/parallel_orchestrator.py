@@ -11,7 +11,7 @@ from typing import Annotated, Any, Callable, Optional, Protocol, TypedDict, runt
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send
 
-from ..generic_agents import BasicVerifierAgent, RulePolicyAgent, TemplatePlannerAgent
+from ..generic_agents import BasicVerifierAgent, RulePolicyAgent, TemplatePlannerAgent, safe_node
 from ..models import Evidence, Outcome, Plan, PolicyDecision, Signal, Task, Verification
 from ..retrieval import KnowledgeBaseRetriever
 
@@ -83,13 +83,13 @@ class ParallelOrchestratorWeaver:
         self.initial_audit_fn = initial_audit_fn
 
         builder = StateGraph(ParallelOrchestratorState)
-        builder.add_node("run_sub_agent", self._run_sub_agent_node)
+        builder.add_node("run_sub_agent", safe_node(self._run_sub_agent_node, {"findings": []}))
         builder.add_node("aggregate", self._aggregate_node)
-        builder.add_node("retrieve", self._retrieve_node)
-        builder.add_node("policy", self._policy_node)
-        builder.add_node("plan", self._plan_node)
-        builder.add_node("verify", self._verify_node)
-        builder.add_node("finalize", self._finalize_node)
+        builder.add_node("retrieve",  safe_node(self._retrieve_node, {"evidence": (), "audit_trail": ["retrieve:error"]}))
+        builder.add_node("policy",    safe_node(self._policy_node,   {"audit_trail": ["policy:error"]}))
+        builder.add_node("plan",      safe_node(self._plan_node,     {"audit_trail": ["plan:error"]}))
+        builder.add_node("verify",    safe_node(self._verify_node,   {"audit_trail": ["verify:error"]}))
+        builder.add_node("finalize",  self._finalize_node)
 
         builder.add_conditional_edges(START, self._dispatch_sub_agents, ["run_sub_agent"])
         builder.add_edge("run_sub_agent", "aggregate")

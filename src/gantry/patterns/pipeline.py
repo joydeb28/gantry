@@ -13,6 +13,7 @@ from langgraph.graph import StateGraph, START, END
 
 from ..models import Task, Signal, Evidence, PolicyDecision, Plan, Verification, Outcome, AgentRecipe
 from ..retrieval import KnowledgeBaseRetriever
+from ..generic_agents import safe_node
 
 
 class PipelineState(TypedDict):
@@ -34,11 +35,11 @@ class PipelineWeaver:
         self.retriever = retriever
 
         builder = StateGraph(PipelineState)
-        builder.add_node("signal", self._signal_node)
-        builder.add_node("retrieve", self._retrieve_node)
-        builder.add_node("policy", self._policy_node)
-        builder.add_node("plan", self._plan_node)
-        builder.add_node("verify", self._verify_node)
+        builder.add_node("signal",   safe_node(self._signal_node,   {"audit_trail": ["signal:error"]}))
+        builder.add_node("retrieve", safe_node(self._retrieve_node, {"evidence": (), "audit_trail": ["retrieve:error"]}))
+        builder.add_node("policy",   safe_node(self._policy_node,   {"audit_trail": ["policy:error"]}))
+        builder.add_node("plan",     safe_node(self._plan_node,     {"audit_trail": ["plan:error"]}))
+        builder.add_node("verify",   safe_node(self._verify_node,   {"audit_trail": ["verify:error"]}))
         builder.add_node("finalize", self._finalize_node)
 
         builder.add_edge(START, "signal")

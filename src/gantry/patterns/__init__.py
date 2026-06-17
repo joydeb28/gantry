@@ -6,17 +6,17 @@ Each pattern class implements the same interface:
     outcome = weaver.run(task)
 
 Available patterns:
-- PipelineWeaver          : Sequential claim-weaving chain (support, crm)
-- OrchestratorWeaver      : Orchestrator + N sub-agents fan-out (guardrail)
-- FraudOrchestratorWeaver : Fraud-specialist orchestrator + 5 sub-agents (fraud)
-- RouterWeaver            : Classify → dispatch to specialist agent (it helpdesk)
-- ReflectionWeaver        : Draft → Critic loop until approved (legal)
-- HumanInTheLoopWeaver    : Pause at checkpoint, resume on approval (hr)
-- PlanExecuteWeaver       : Multi-step plan, each step verified (finance)
+- PipelineWeaver              : Sequential claim-weaving chain (support, crm, research, coding)
+- OrchestratorWeaver          : Orchestrator + N sub-agents fan-out (guardrail)
+- ParallelOrchestratorWeaver  : Generic parallel fan-out with custom aggregation (fraud)
+- RouterWeaver                : Classify → dispatch to specialist agent (it helpdesk)
+- ReflectionWeaver            : Draft → Critic loop until approved (legal)
+- HumanInTheLoopWeaver        : Pause at checkpoint, resume on approval (hr)
+- PlanExecuteWeaver           : Multi-step plan, each step verified (finance)
 """
 
 from .pipeline import PipelineWeaver
-from .orchestrator import OrchestratorWeaver, SubAgentFinding
+from .orchestrator import OrchestratorWeaver
 from .parallel_orchestrator import ParallelOrchestratorWeaver
 from .router import RouterWeaver, SpecialistAgent
 from .reflection import ReflectionWeaver, CriticAgent, Critique
@@ -27,7 +27,6 @@ __all__ = [
     "PipelineWeaver",
     "OrchestratorWeaver",
     "ParallelOrchestratorWeaver",
-    "SubAgentFinding",
     "RouterWeaver",
     "SpecialistAgent",
     "ReflectionWeaver",

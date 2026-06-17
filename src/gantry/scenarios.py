@@ -43,11 +43,24 @@ def weaver_for(
     planner_type: str = "template",
     model_name: Optional[str] = None,
     base_url: Optional[str] = None,
+    checkpoint_backend: str = "sqlite",
+    db_url: Optional[str] = None,
 ) -> Any:
     """Return the correct weaver for a use case, loaded with its KB.
 
     Each use case uses a different agentic pattern. The returned object
     always exposes a run(task) -> Outcome method.
+
+    Args:
+        use_case:            One of the registered use-case keys.
+        kb_root:             Root directory containing per-use-case KB folders.
+        planner_type:        Planning engine. One of:
+                             ``template`` (default, no LLM),
+                             ``ollama``, ``vllm``, ``openai``, ``gemini``, ``anthropic``.
+        model_name:          Model name for the LLM planner.
+        base_url:            Override LLM API base URL.
+        checkpoint_backend:  ``"sqlite"`` (default) or ``"postgres"`` for HITL.
+        db_url:              PostgreSQL connection URL (reads DATABASE_URL env var if not provided).
     """
     builders = {
         "support": _pipeline_weaver,
@@ -72,15 +85,22 @@ def weaver_for(
 
     # Dynamically build the LLM-powered planner agent if requested
     planner_agent = None
-    if planner_type in ("ollama", "vllm"):
+    if planner_type != "template":
         from .llm import LangChainPlanner, LangChainPlannerAgent
-        model = model_name or ("qwen3:4b" if planner_type == "ollama" else "Qwen/Qwen3-4B")
-        default_url = "http://localhost:11434" if planner_type == "ollama" else "http://localhost:8000"
-        url = base_url or default_url
-        planner = LangChainPlanner(model=model, base_url=url)
+        planner = LangChainPlanner(
+            provider=planner_type,
+            model=model_name,
+            base_url=base_url,
+        )
         planner_agent = LangChainPlannerAgent(planner)
 
-    return builder(use_case, retriever, planner_agent=planner_agent)
+    return builder(
+        use_case,
+        retriever,
+        planner_agent=planner_agent,
+        checkpoint_backend=checkpoint_backend,
+        db_url=db_url,
+    )
 
 
 def recipe_for(use_case: str) -> AgentRecipe:
@@ -111,6 +131,7 @@ def _pipeline_weaver(
     use_case: str,
     retriever: KnowledgeBaseRetriever,
     planner_agent: Optional[Any] = None,
+    **_kwargs: Any,
 ) -> PipelineWeaver:
     recipe_map = {
         "support": support_recipe,
@@ -128,6 +149,7 @@ def _orchestrator_weaver(
     use_case: str,
     retriever: KnowledgeBaseRetriever,
     planner_agent: Optional[Any] = None,
+    **_kwargs: Any,
 ) -> OrchestratorWeaver:
     return guardrail_harness(retriever, planner_agent=planner_agent)
 
@@ -136,6 +158,7 @@ def _router_weaver(
     use_case: str,
     retriever: KnowledgeBaseRetriever,
     planner_agent: Optional[Any] = None,
+    **_kwargs: Any,
 ) -> RouterWeaver:
     return it_harness(retriever, planner_agent=planner_agent)
 
@@ -144,6 +167,7 @@ def _reflection_weaver(
     use_case: str,
     retriever: KnowledgeBaseRetriever,
     planner_agent: Optional[Any] = None,
+    **_kwargs: Any,
 ) -> ReflectionWeaver:
     return legal_harness(retriever, planner_agent=planner_agent)
 
@@ -152,14 +176,23 @@ def _hitl_weaver(
     use_case: str,
     retriever: KnowledgeBaseRetriever,
     planner_agent: Optional[Any] = None,
+    checkpoint_backend: str = "sqlite",
+    db_url: Optional[str] = None,
+    **_kwargs: Any,
 ) -> HumanInTheLoopWeaver:
-    return hr_harness(retriever, planner_agent=planner_agent)
+    return hr_harness(
+        retriever,
+        planner_agent=planner_agent,
+        checkpoint_backend=checkpoint_backend,
+        db_url=db_url,
+    )
 
 
 def _plan_execute_weaver(
     use_case: str,
     retriever: KnowledgeBaseRetriever,
     planner_agent: Optional[Any] = None,
+    **_kwargs: Any,
 ) -> PlanExecuteWeaver:
     return finance_harness(retriever, planner_agent=planner_agent)
 
@@ -168,6 +201,7 @@ def _fraud_weaver(
     use_case: str,
     retriever: KnowledgeBaseRetriever,
     planner_agent: Optional[Any] = None,
+    **_kwargs: Any,
 ) -> ParallelOrchestratorWeaver:
     return fraud_harness(retriever, planner_agent=planner_agent)
 
@@ -564,7 +598,12 @@ def legal_harness(retriever: KnowledgeBaseRetriever, planner_agent: Optional[Any
     )
 
 
-def hr_harness(retriever: KnowledgeBaseRetriever, planner_agent: Optional[Any] = None) -> HumanInTheLoopWeaver:
+def hr_harness(
+    retriever: KnowledgeBaseRetriever,
+    planner_agent: Optional[Any] = None,
+    checkpoint_backend: str = "sqlite",
+    db_url: Optional[str] = None,
+) -> HumanInTheLoopWeaver:
     """HR & Onboarding — Human-in-the-Loop pattern.
 
     Leave requests and onboarding trigger a HITL checkpoint: the workflow
@@ -605,6 +644,8 @@ def hr_harness(retriever: KnowledgeBaseRetriever, planner_agent: Optional[Any] =
         verifier_agent=BasicVerifierAgent(),
         retriever=retriever,
         approval_required_intents=("onboarding", "leave_request"),
+        checkpoint_backend=checkpoint_backend,
+        db_url=db_url,
     )
 
 
