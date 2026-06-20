@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import logging
 import os
+import random
+import time
 from typing import TYPE_CHECKING
 
 from langchain_core.language_models import BaseChatModel
@@ -88,6 +90,53 @@ Produce a plan. Return valid JSON matching the Plan schema.
 
 
 # ---------------------------------------------------------------------------
+# Evidence budget helper (C-3)
+# ---------------------------------------------------------------------------
+
+_EVIDENCE_CHAR_BUDGET = 6_000  # ~1 500 tokens at 4 chars/token; safe for all providers
+
+
+def _build_evidence_text(
+    evidence: tuple[Evidence, ...],
+    char_budget: int = _EVIDENCE_CHAR_BUDGET,
+) -> str:
+    """Build the evidence block for the LLM prompt, respecting a total character budget.
+
+    Documents are included in score order (already ranked by the retriever).
+    Each document gets an equal initial share of the budget; any leftover from
+    short documents rolls over to subsequent ones.  Truncation is marked with
+    ``[truncated]`` so the LLM knows the text is cut.
+
+    Args:
+        evidence:    Ranked Evidence tuple from the retriever.
+        char_budget: Maximum total characters for the evidence block.
+                     Default: 6 000 (~1 500 tokens).  Adjust per provider limits.
+
+    Returns:
+        A formatted string ready for the ``{evidence_text}`` prompt slot.
+    """
+    if not evidence:
+        return "No documents retrieved."
+
+    per_doc = max(200, char_budget // len(evidence))
+    parts: list[str] = []
+    remaining = char_budget
+
+    for i, e in enumerate(evidence):
+        if remaining <= 0:
+            break
+        alloc = min(per_doc, remaining)
+        if len(e.text) <= alloc:
+            text = e.text
+        else:
+            text = e.text[:alloc] + "[truncated]"
+        parts.append(f"[{i + 1}] {e.title} (score={e.score:.2f})\n{text}")
+        remaining -= len(text)
+
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # Provider factory
 # ---------------------------------------------------------------------------
 
@@ -109,6 +158,10 @@ _DEFAULT_BASE_URLS: dict[str, str] = {
     "ollama": "http://localhost:11434",
     "vllm":   "http://localhost:8000/v1",
 }
+
+# Retry parameters for LLM calls (C-4)
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 1.0  # seconds; doubles on each attempt (exponential backoff)
 
 
 def build_llm(
@@ -270,6 +323,10 @@ class LangChainPlanner:
     ) -> Plan:
         """Generate a Plan using the LLM.
 
+        Retries up to ``_MAX_RETRIES`` times with exponential backoff + jitter
+        on any transient error (network timeout, rate-limit, malformed output).
+        Raises ``RuntimeError`` only after all retries are exhausted.
+
         Args:
             task:     The input task.
             signal:   Extracted intent and risk.
@@ -279,23 +336,41 @@ class LangChainPlanner:
         Returns:
             A fully validated ``Plan`` Pydantic object.
         """
-        evidence_text = "\n".join(
-            f"[{i+1}] {e.title} (score={e.score:.2f})\n{e.text[:300]}"
-            for i, e in enumerate(evidence)
-        ) or "No documents retrieved."
+        evidence_text = _build_evidence_text(evidence)
 
-        plan: Plan = self._chain.invoke({
-            "use_case":       task.use_case,
-            "title":          task.title,
-            "body":           task.body,
-            "intent":         signal.intent,
-            "risk":           signal.risk,
-            "missing_fields": ", ".join(signal.missing_fields) or "none",
+        invoke_kwargs = {
+            "use_case":        task.use_case,
+            "title":           task.title,
+            "body":            task.body,
+            "intent":          signal.intent,
+            "risk":            signal.risk,
+            "missing_fields":  ", ".join(signal.missing_fields) or "none",
             "allowed_actions": ", ".join(policy.allowed_actions),
             "blocked_actions": ", ".join(policy.blocked_actions) or "none",
             "policy_reason":   policy.reason or "standard policy",
             "evidence_text":   evidence_text,
-        })
+        }
+
+        last_exc: Exception | None = None
+        plan: Plan | None = None
+
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                plan = self._chain.invoke(invoke_kwargs)
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt < _MAX_RETRIES:
+                    delay = _RETRY_BASE_DELAY * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+                    logger.warning(
+                        "LangChain planner attempt %d/%d failed (%s: %s); retrying in %.1fs",
+                        attempt, _MAX_RETRIES, type(exc).__name__, exc, delay,
+                    )
+                    time.sleep(delay)
+        else:
+            raise RuntimeError(
+                f"LangChain planner failed after {_MAX_RETRIES} attempts"
+            ) from last_exc
 
         logger.info(
             "LangChain planner [%s/%s] → action=%s confidence=%.2f",

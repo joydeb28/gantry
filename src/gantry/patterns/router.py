@@ -7,7 +7,8 @@ mini pipeline (policy + plan), keeping domain logic isolated.
 
 from __future__ import annotations
 
-from typing import Any, Optional, TypedDict
+import operator
+from typing import Annotated, Any, Optional, TypedDict
 from langgraph.graph import StateGraph, START, END
 
 from ..generic_agents import BasicVerifierAgent, RulePolicyAgent, TemplatePlannerAgent, safe_node
@@ -33,7 +34,7 @@ class RouterState(TypedDict):
     draft: Optional[Plan]
     verification: Optional[Verification]
     outcome: Optional[Outcome]
-    audit_trail: list[str]
+    audit_trail: Annotated[list[str], operator.add]  # LangGraph merges via operator.add
 
 
 class RouterWeaver:
@@ -66,7 +67,10 @@ class RouterWeaver:
             builder.add_node(f"specialist_{name}", safe_node(self._make_specialist_node(name), {"audit_trail": [f"specialist_{name}:error"]}))
 
         builder.add_node("verify",   safe_node(self._verify_node,   {"audit_trail": ["verify:error"]}))
-        builder.add_node("finalize", self._finalize_node)
+        builder.add_node(
+            "finalize",
+            safe_node(self._finalize_node, {"outcome": None, "audit_trail": ["finalize:error"]}),
+        )
 
         builder.add_edge(START, "router")
         builder.add_edge("router", "retrieve")
@@ -104,9 +108,7 @@ class RouterWeaver:
     def _retrieve_node(self, state: RouterState) -> dict:
         task = state["task"]
         evidence = self.retriever.search(task.text)
-        audit = list(state.get("audit_trail") or [])
-        audit.append(f"retrieval:documents={len(evidence)}")
-        return {"evidence": evidence, "audit_trail": audit}
+        return {"evidence": evidence, "audit_trail": [f"retrieval:documents={len(evidence)}"]}
 
     def _route_decision(self, state: RouterState) -> str:
         return state["route"]
@@ -135,18 +137,46 @@ class RouterWeaver:
         policy = state["policy"]
         evidence = state["evidence"]
         verification = self.verifier_agent.run(draft, policy, evidence)
-        audit = list(state.get("audit_trail") or [])
-        audit.append(f"verify:approved={verification.approved}:score={verification.score}")
-        return {"verification": verification, "audit_trail": audit}
+        return {"verification": verification, "audit_trail": [f"verify:approved={verification.approved}:score={verification.score}"]}
 
     def _finalize_node(self, state: RouterState) -> dict:
         task = state["task"]
-        signal = state["signal"]
-        evidence = state["evidence"]
-        policy = state["policy"]
-        draft = state["draft"]
-        verification = state["verification"]
+        signal = state.get("signal")
+        evidence = state.get("evidence") or ()
+        policy = state.get("policy")
+        draft = state.get("draft")
+        verification = state.get("verification")
         audit = list(state.get("audit_trail") or [])
+
+        # Guard: upstream safe_node failure may have left None in state.
+        if policy is None or draft is None or verification is None:
+            missing = [k for k, v in [("policy", policy), ("draft", draft), ("verification", verification)] if v is None]
+            audit.append(f"finalize:upstream_failure:missing={','.join(missing)}:escalating")
+            outcome = Outcome(
+                task_id=task.id,
+                use_case=task.use_case,
+                signal=signal or Signal(intent="unknown", risk=3),
+                evidence=evidence,
+                policy=policy or PolicyDecision(
+                    allowed_actions=(self.fallback_action,),
+                    reason="upstream node failure",
+                ),
+                draft=draft or Plan(
+                    action=self.fallback_action,
+                    confidence=0.0,
+                    response=self.fallback_response,
+                    internal_note="upstream node failure",
+                ),
+                verification=verification or Verification(
+                    approved=False, score=0.0,
+                    findings=("upstream node failed — see audit_trail",),
+                ),
+                final_action=self.fallback_action,
+                response=self.fallback_response,
+                internal_note=f"Upstream node failure: {', '.join(missing)} was None.",
+                audit_trail=audit,
+            )
+            return {"outcome": outcome}
 
         if verification.approved:
             final_action = draft.action

@@ -19,10 +19,25 @@ Usage::
     # Remote / in-memory KB
     retriever = RemoteRetriever(documents=["Policy A text...", "Policy B text..."])
     docs = retriever.search("refund policy")
+
+Thread-safety note:
+    LlamaIndex ≤0.14 uses ``llama_index.core.Settings`` as a process-level
+    singleton.  Mutating ``Settings.embed_model`` from two threads simultaneously
+    causes a race condition where each retriever may end up using the wrong
+    embedding model.
+
+    **This file never touches ``Settings`` at all.**  Instead, the
+    ``HuggingFaceEmbedding`` instance is constructed locally and passed
+    directly to ``VectorStoreIndex(embed_model=...)``,
+    ``VectorStoreIndex.from_documents(..., embed_model=...)``, and
+    ``load_index_from_storage(..., embed_model=...)``.  Each retriever owns
+    its own embedding object — no shared mutable global state.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -70,6 +85,17 @@ class KnowledgeBaseRetriever:
 
     On subsequent runs: loads the cached index from disk instantly.
 
+    Cache invalidation:
+        A SHA-256 fingerprint of the KB directory (file names + mtimes + sizes)
+        is stored alongside the index.  If the fingerprint changes (files added,
+        removed, or modified), the cache is automatically busted and rebuilt.
+
+    Thread-safety:
+        The ``HuggingFaceEmbedding`` instance is constructed locally and passed
+        directly to LlamaIndex constructors — ``Settings`` is never mutated.
+        Multiple ``KnowledgeBaseRetriever`` instances can be initialised
+        concurrently without racing each other.
+
     Args:
         kb_path:  Path to the directory of Markdown KB files.
         use_case: Name of the use case (used for cache directory naming).
@@ -78,10 +104,10 @@ class KnowledgeBaseRetriever:
 
     _EMBED_MODEL = "BAAI/bge-small-en-v1.5"
     _CACHE_BASE = Path(".llama_index_cache")
+    _FINGERPRINT_FILE = "kb_fingerprint.json"
 
     def __init__(self, kb_path: str | Path, use_case: str, top_k: int = 3) -> None:
         from llama_index.core import (
-            Settings,
             SimpleDirectoryReader,
             StorageContext,
             VectorStoreIndex,
@@ -89,31 +115,81 @@ class KnowledgeBaseRetriever:
         )
         from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
-        # MUST set embed_model before any index operation;
-        # default is OpenAI text-embedding-ada-002 which requires an API key.
-        Settings.embed_model = HuggingFaceEmbedding(model_name=self._EMBED_MODEL)
-        Settings.llm = None  # pure retrieval — no LLM needed in index operations
+        # Build the embedding model locally — never mutate the global Settings singleton.
+        # This makes concurrent retriever construction safe.
+        embed_model = HuggingFaceEmbedding(model_name=self._EMBED_MODEL)
 
         cache_dir = self._CACHE_BASE / use_case
         kb_path = Path(kb_path)
 
-        if cache_dir.exists():
+        current_fp = self._compute_fingerprint(kb_path)
+        cached_fp = self._load_cached_fingerprint(cache_dir)
+
+        if cache_dir.exists() and current_fp == cached_fp:
             logger.info("Loading cached index for '%s' from %s", use_case, cache_dir)
             sc = StorageContext.from_defaults(persist_dir=str(cache_dir))
-            index = load_index_from_storage(sc)
+            # Pass embed_model directly — does NOT touch Settings
+            index = load_index_from_storage(sc, embed_model=embed_model)
         else:
-            logger.info("Building index for '%s' from %s", use_case, kb_path)
+            if cache_dir.exists() and current_fp != cached_fp:
+                logger.info(
+                    "KB fingerprint changed for '%s' — rebuilding index "
+                    "(cached=%s, current=%s)",
+                    use_case, cached_fp[:8] if cached_fp else "none", current_fp[:8],
+                )
+            else:
+                logger.info("Building index for '%s' from %s", use_case, kb_path)
+
             docs = SimpleDirectoryReader(
                 input_dir=str(kb_path),
                 required_exts=[".md"],
                 recursive=False,
             ).load_data()
-            index = VectorStoreIndex.from_documents(docs)
+            # Pass embed_model directly — does NOT touch Settings
+            index = VectorStoreIndex.from_documents(docs, embed_model=embed_model)
             index.storage_context.persist(persist_dir=str(cache_dir))
-            logger.info("Index persisted to %s", cache_dir)
+            self._save_fingerprint(cache_dir, current_fp)
+            logger.info("Index persisted to %s (fingerprint=%s)", cache_dir, current_fp[:8])
 
         self._retriever = index.as_retriever(similarity_top_k=top_k)
         self._use_case = use_case
+
+    # ------------------------------------------------------------------
+    # Cache fingerprinting (O-7)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _compute_fingerprint(cls, kb_path: Path) -> str:
+        """SHA-256 fingerprint of the KB directory contents.
+
+        Hashes the sorted list of (filename, mtime_ns, size_bytes) tuples
+        for all ``.md`` files in ``kb_path``.  Any add, remove, or modify
+        operation changes the fingerprint and triggers a cache rebuild.
+        """
+        entries = sorted(
+            (p.name, p.stat().st_mtime_ns, p.stat().st_size)
+            for p in kb_path.glob("*.md")
+            if p.is_file()
+        )
+        payload = json.dumps(entries, separators=(",", ":")).encode()
+        return hashlib.sha256(payload).hexdigest()
+
+    @classmethod
+    def _load_cached_fingerprint(cls, cache_dir: Path) -> str | None:
+        """Read the stored fingerprint from the cache directory, or None."""
+        fp_file = cache_dir / cls._FINGERPRINT_FILE
+        if fp_file.exists():
+            try:
+                return json.loads(fp_file.read_text())["fingerprint"]
+            except (KeyError, json.JSONDecodeError, OSError):
+                return None
+        return None
+
+    @classmethod
+    def _save_fingerprint(cls, cache_dir: Path, fingerprint: str) -> None:
+        """Persist the fingerprint alongside the index."""
+        fp_file = cache_dir / cls._FINGERPRINT_FILE
+        fp_file.write_text(json.dumps({"fingerprint": fingerprint}))
 
     def search(self, query: str) -> tuple[Evidence, ...]:
         """Return top-k semantically relevant Evidence objects for the query."""
@@ -155,6 +231,10 @@ class RemoteRetriever:
     Builds a LlamaIndex in-memory vector index from the supplied document
     strings using the same offline embedding model as ``KnowledgeBaseRetriever``.
 
+    Thread-safety:
+        The ``HuggingFaceEmbedding`` instance is constructed locally and passed
+        directly to LlamaIndex constructors — ``Settings`` is never mutated.
+
     Args:
         documents:   List of document text strings to index.
         titles:      Optional list of document titles (same length as documents).
@@ -181,12 +261,12 @@ class RemoteRetriever:
         top_k: int = 3,
         model_name: str = _EMBED_MODEL,
     ) -> None:
-        from llama_index.core import Settings, VectorStoreIndex
+        from llama_index.core import VectorStoreIndex
         from llama_index.core.schema import TextNode
         from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
-        Settings.embed_model = HuggingFaceEmbedding(model_name=model_name)
-        Settings.llm = None
+        # Build the embedding model locally — never mutate the global Settings singleton.
+        embed_model = HuggingFaceEmbedding(model_name=model_name)
 
         _titles = titles if titles and len(titles) == len(documents) else [
             f"doc_{i}" for i in range(len(documents))
@@ -197,7 +277,8 @@ class RemoteRetriever:
             for text, title in zip(documents, _titles)
         ]
 
-        index = VectorStoreIndex(nodes)
+        # Pass embed_model directly — does NOT touch Settings
+        index = VectorStoreIndex(nodes, embed_model=embed_model)
         self._retriever = index.as_retriever(similarity_top_k=top_k)
         logger.info("RemoteRetriever: indexed %d documents in memory.", len(documents))
 

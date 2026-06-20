@@ -8,7 +8,8 @@ Each step has exactly one job and passes a typed claim to the next step.
 
 from __future__ import annotations
 
-from typing import Optional, TypedDict
+import operator
+from typing import Annotated, Optional
 from langgraph.graph import StateGraph, START, END
 
 from ..models import Task, Signal, Evidence, PolicyDecision, Plan, Verification, Outcome, AgentRecipe
@@ -24,7 +25,7 @@ class PipelineState(TypedDict):
     draft: Optional[Plan]
     verification: Optional[Verification]
     outcome: Optional[Outcome]
-    audit_trail: list[str]
+    audit_trail: Annotated[list[str], operator.add]  # LangGraph merges via operator.add
 
 
 class PipelineWeaver:
@@ -40,7 +41,10 @@ class PipelineWeaver:
         builder.add_node("policy",   safe_node(self._policy_node,   {"audit_trail": ["policy:error"]}))
         builder.add_node("plan",     safe_node(self._plan_node,     {"audit_trail": ["plan:error"]}))
         builder.add_node("verify",   safe_node(self._verify_node,   {"audit_trail": ["verify:error"]}))
-        builder.add_node("finalize", self._finalize_node)
+        builder.add_node(
+            "finalize",
+            safe_node(self._finalize_node, self._fallback_outcome_dict()),
+        )
 
         builder.add_edge(START, "signal")
         builder.add_edge("signal", "retrieve")
@@ -55,24 +59,27 @@ class PipelineWeaver:
     def _signal_node(self, state: PipelineState) -> dict:
         task = state["task"]
         signal = self.recipe.signal_agent.run(task)
-        audit = list(state.get("audit_trail") or [])
-        audit.append(f"signal:intent={signal.intent}:risk={signal.risk}")
-        return {"signal": signal, "audit_trail": audit}
+        return {
+            "signal": signal,
+            "audit_trail": [f"signal:intent={signal.intent}:risk={signal.risk}"],
+        }
 
     def _retrieve_node(self, state: PipelineState) -> dict:
         task = state["task"]
         evidence = self.retriever.search(task.text)
-        audit = list(state.get("audit_trail") or [])
-        audit.append(f"retrieval:documents={len(evidence)}")
-        return {"evidence": evidence, "audit_trail": audit}
+        return {
+            "evidence": evidence,
+            "audit_trail": [f"retrieval:documents={len(evidence)}"],
+        }
 
     def _policy_node(self, state: PipelineState) -> dict:
         task = state["task"]
         signal = state["signal"]
         policy = self.recipe.policy_agent.run(task, signal)
-        audit = list(state.get("audit_trail") or [])
-        audit.append(f"policy:allowed={','.join(policy.allowed_actions)}")
-        return {"policy": policy, "audit_trail": audit}
+        return {
+            "policy": policy,
+            "audit_trail": [f"policy:allowed={','.join(policy.allowed_actions)}"],
+        }
 
     def _plan_node(self, state: PipelineState) -> dict:
         task = state["task"]
@@ -80,27 +87,66 @@ class PipelineWeaver:
         evidence = state["evidence"]
         policy = state["policy"]
         draft = self.recipe.planner_agent.run(task, signal, evidence, policy)
-        audit = list(state.get("audit_trail") or [])
-        audit.append(f"draft:action={draft.action}:confidence={draft.confidence}")
-        return {"draft": draft, "audit_trail": audit}
+        return {
+            "draft": draft,
+            "audit_trail": [f"draft:action={draft.action}:confidence={draft.confidence}"],
+        }
 
     def _verify_node(self, state: PipelineState) -> dict:
         draft = state["draft"]
         policy = state["policy"]
         evidence = state["evidence"]
         verification = self.recipe.verifier_agent.run(draft, policy, evidence)
-        audit = list(state.get("audit_trail") or [])
-        audit.append(f"verify:approved={verification.approved}:score={verification.score}")
-        return {"verification": verification, "audit_trail": audit}
+        return {
+            "verification": verification,
+            "audit_trail": [f"verify:approved={verification.approved}:score={verification.score}"],
+        }
+
+    def _fallback_outcome_dict(self) -> dict:
+        """Return a safe-node fallback dict used when _finalize_node itself fails."""
+        return {"outcome": None, "audit_trail": ["finalize:error"]}
 
     def _finalize_node(self, state: PipelineState) -> dict:
         task = state["task"]
-        signal = state["signal"]
-        evidence = state["evidence"]
-        policy = state["policy"]
-        draft = state["draft"]
-        verification = state["verification"]
-        audit = list(state.get("audit_trail") or [])
+        signal = state.get("signal")
+        evidence = state.get("evidence") or ()
+        policy = state.get("policy")
+        draft = state.get("draft")
+        verification = state.get("verification")
+        # Full trail accumulated by LangGraph reducer across all previous nodes
+        full_audit = list(state.get("audit_trail") or [])
+        new_entries: list[str] = []
+
+        # Guard: upstream safe_node failure may have left None in state.
+        # Degrade gracefully to an escalation Outcome rather than crashing.
+        if policy is None or draft is None or verification is None:
+            missing = [k for k, v in [("policy", policy), ("draft", draft), ("verification", verification)] if v is None]
+            new_entries.append(f"finalize:upstream_failure:missing={','.join(missing)}:escalating")
+            outcome = Outcome(
+                task_id=task.id,
+                use_case=task.use_case,
+                signal=signal or Signal(intent="unknown", risk=3),
+                evidence=evidence,
+                policy=policy or PolicyDecision(
+                    allowed_actions=(self.recipe.fallback_action,),
+                    reason="upstream node failure",
+                ),
+                draft=draft or Plan(
+                    action=self.recipe.fallback_action,
+                    confidence=0.0,
+                    response=self.recipe.fallback_response,
+                    internal_note="upstream node failure",
+                ),
+                verification=verification or Verification(
+                    approved=False, score=0.0,
+                    findings=("upstream node failed — see audit_trail",),
+                ),
+                final_action=self.recipe.fallback_action,
+                response=self.recipe.fallback_response,
+                internal_note=f"Upstream node failure: {', '.join(missing)} was None.",
+                audit_trail=full_audit + new_entries,
+            )
+            return {"outcome": outcome, "audit_trail": new_entries}
 
         if verification.approved:
             final_action = draft.action
@@ -110,7 +156,7 @@ class PipelineWeaver:
             final_action = self.recipe.fallback_action
             response = self.recipe.fallback_response
             note = f"Verifier blocked: {'; '.join(verification.findings)}"
-            audit.append(f"fallback:{self.recipe.fallback_action}")
+            new_entries.append(f"fallback:{self.recipe.fallback_action}")
 
         outcome = Outcome(
             task_id=task.id,
@@ -123,9 +169,9 @@ class PipelineWeaver:
             final_action=final_action,
             response=response,
             internal_note=note,
-            audit_trail=audit,
+            audit_trail=full_audit + new_entries,
         )
-        return {"outcome": outcome}
+        return {"outcome": outcome, "audit_trail": new_entries}
 
     def run(self, task: Task) -> Outcome:
         initial_audit = [

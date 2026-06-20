@@ -10,7 +10,7 @@ Pydantic v2 provides:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -147,19 +147,91 @@ class FraudFinding(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Agent role Protocols (O-1)
+# ---------------------------------------------------------------------------
+
+@runtime_checkable
+class SignalAgentProtocol(Protocol):
+    """Any agent that accepts a Task and returns a Signal."""
+    def run(self, task: Task) -> Signal: ...
+
+
+@runtime_checkable
+class PolicyAgentProtocol(Protocol):
+    """Any agent that accepts a Task + Signal and returns a PolicyDecision."""
+    def run(self, task: Task, signal: Signal) -> PolicyDecision: ...
+
+
+@runtime_checkable
+class PlannerAgentProtocol(Protocol):
+    """Any agent that accepts Task + Signal + Evidence + PolicyDecision and returns a Plan."""
+    def run(
+        self,
+        task: Task,
+        signal: Signal,
+        evidence: tuple[Evidence, ...],
+        policy: PolicyDecision,
+    ) -> Plan: ...
+
+
+@runtime_checkable
+class VerifierAgentProtocol(Protocol):
+    """Any agent that accepts Plan + PolicyDecision + Evidence and returns a Verification."""
+    def run(
+        self,
+        draft: Plan,
+        policy: PolicyDecision,
+        evidence: tuple[Evidence, ...],
+    ) -> Verification: ...
+
+
+# ---------------------------------------------------------------------------
 # Agent Recipe
 # ---------------------------------------------------------------------------
 
 class AgentRecipe(BaseModel):
-    """Configuration bundle defining the agents for a pipeline use case."""
+    """Configuration bundle defining the agents for a pipeline use case.
+
+    All four agent fields are validated at construction time against their
+    respective Protocol — a misconfigured agent (wrong type, missing .run(),
+    wrong signature) raises a ``ValueError`` immediately rather than producing
+    an ``AttributeError`` deep inside a running graph node.
+    """
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     use_case: str
-    signal_agent: Any
-    policy_agent: Any
-    planner_agent: Any
-    verifier_agent: Any
+    signal_agent: SignalAgentProtocol
+    policy_agent: PolicyAgentProtocol
+    planner_agent: PlannerAgentProtocol
+    verifier_agent: VerifierAgentProtocol
     fallback_action: str = "escalate"
     fallback_response: str = "This needs review before automation continues."
 
+    @model_validator(mode="after")
+    def _validate_agent_protocols(self) -> "AgentRecipe":
+        """Raise ValueError at construction if any agent violates its Protocol.
+
+        ``@runtime_checkable`` enables ``isinstance`` checks on Protocols so
+        any duck-typed object with the correct ``.run()`` method passes —
+        no inheritance from the Protocol class is required.
+        """
+        checks: list[tuple[str, Any, type]] = [
+            ("signal_agent",   self.signal_agent,   SignalAgentProtocol),
+            ("policy_agent",   self.policy_agent,   PolicyAgentProtocol),
+            ("planner_agent",  self.planner_agent,  PlannerAgentProtocol),
+            ("verifier_agent", self.verifier_agent, VerifierAgentProtocol),
+        ]
+        errors: list[str] = []
+        for field_name, agent, proto in checks:
+            if not isinstance(agent, proto):
+                errors.append(
+                    f"{field_name} ({type(agent).__name__!r}) does not satisfy "
+                    f"{proto.__name__}: missing or incompatible .run() method"
+                )
+        if errors:
+            raise ValueError(
+                "AgentRecipe misconfiguration — caught at construction time:\n"
+                + "\n".join(f"  • {e}" for e in errors)
+            )
+        return self

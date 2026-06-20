@@ -8,7 +8,8 @@ The loop continues until approved or max_turns is reached.
 
 from __future__ import annotations
 
-from typing import Optional, TypedDict
+import operator
+from typing import Annotated, Optional, TypedDict
 from pydantic import BaseModel, ConfigDict
 from langgraph.graph import StateGraph, START, END
 
@@ -67,7 +68,7 @@ class ReflectionState(TypedDict):
     turn: int
     verification: Optional[Verification]
     outcome: Optional[Outcome]
-    audit_trail: list[str]
+    audit_trail: Annotated[list[str], operator.add]  # LangGraph merges via operator.add
 
 
 class ReflectionWeaver:
@@ -104,7 +105,10 @@ class ReflectionWeaver:
         builder.add_node("drafter",  safe_node(self._drafter_node,  {"audit_trail": ["drafter:error"]}))
         builder.add_node("critic",   safe_node(self._critic_node,   {"audit_trail": ["critic:error"]}))
         builder.add_node("verify",   safe_node(self._verify_node,   {"audit_trail": ["verify:error"]}))
-        builder.add_node("finalize", self._finalize_node)
+        builder.add_node(
+            "finalize",
+            safe_node(self._finalize_node, {"outcome": None, "audit_trail": ["finalize:error"]}),
+        )
 
         builder.add_edge(START, "signal")
         builder.add_edge("signal", "retrieve")
@@ -129,16 +133,12 @@ class ReflectionWeaver:
     def _signal_node(self, state: ReflectionState) -> dict:
         task = state["task"]
         signal = self.signal_agent.run(task)
-        audit = list(state.get("audit_trail") or [])
-        audit.append(f"signal:intent={signal.intent}:risk={signal.risk}")
-        return {"signal": signal, "audit_trail": audit}
+        return {"signal": signal, "audit_trail": [f"signal:intent={signal.intent}:risk={signal.risk}"]}
 
     def _retrieve_node(self, state: ReflectionState) -> dict:
         task = state["task"]
         evidence = self.retriever.search(task.text)
-        audit = list(state.get("audit_trail") or [])
-        audit.append(f"retrieval:documents={len(evidence)}")
-        return {"evidence": evidence, "audit_trail": audit}
+        return {"evidence": evidence, "audit_trail": [f"retrieval:documents={len(evidence)}"]}
 
     def _policy_node(self, state: ReflectionState) -> dict:
         task = state["task"]
@@ -208,18 +208,46 @@ class ReflectionWeaver:
         evidence = state["evidence"]
         verification = self.verifier_agent.run(draft, policy, evidence)
 
-        audit = list(state.get("audit_trail") or [])
-        audit.append(f"verify:approved={verification.approved}:score={verification.score}")
-        return {"verification": verification, "audit_trail": audit}
+        return {"verification": verification, "audit_trail": [f"verify:approved={verification.approved}:score={verification.score}"]}
 
     def _finalize_node(self, state: ReflectionState) -> dict:
         task = state["task"]
-        signal = state["signal"]
-        evidence = state["evidence"]
-        policy = state["policy"]
-        draft = state["draft"]
-        verification = state["verification"]
+        signal = state.get("signal")
+        evidence = state.get("evidence") or ()
+        policy = state.get("policy")
+        draft = state.get("draft")
+        verification = state.get("verification")
         audit = list(state.get("audit_trail") or [])
+
+        # Guard: upstream safe_node failure may have left None in state.
+        if policy is None or draft is None or verification is None:
+            missing = [k for k, v in [("policy", policy), ("draft", draft), ("verification", verification)] if v is None]
+            audit.append(f"finalize:upstream_failure:missing={','.join(missing)}:escalating")
+            outcome = Outcome(
+                task_id=task.id,
+                use_case=task.use_case,
+                signal=signal or Signal(intent="unknown", risk=3),
+                evidence=evidence,
+                policy=policy or PolicyDecision(
+                    allowed_actions=(self.fallback_action,),
+                    reason="upstream node failure",
+                ),
+                draft=draft or Plan(
+                    action=self.fallback_action,
+                    confidence=0.0,
+                    response=self.fallback_response,
+                    internal_note="upstream node failure",
+                ),
+                verification=verification or Verification(
+                    approved=False, score=0.0,
+                    findings=("upstream node failed — see audit_trail",),
+                ),
+                final_action=self.fallback_action,
+                response=self.fallback_response,
+                internal_note=f"Upstream node failure: {', '.join(missing)} was None.",
+                audit_trail=audit,
+            )
+            return {"outcome": outcome}
 
         if verification.approved:
             final_action = draft.action

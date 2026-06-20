@@ -35,7 +35,7 @@ class ParallelOrchestratorState(TypedDict):
     draft: Optional[Plan]
     verification: Optional[Verification]
     outcome: Optional[Outcome]
-    audit_trail: list[str]
+    audit_trail: Annotated[list[str], operator.add]  # LangGraph merges via operator.add
 
 
 class ParallelSubAgentState(TypedDict):
@@ -89,7 +89,10 @@ class ParallelOrchestratorWeaver:
         builder.add_node("policy",    safe_node(self._policy_node,   {"audit_trail": ["policy:error"]}))
         builder.add_node("plan",      safe_node(self._plan_node,     {"audit_trail": ["plan:error"]}))
         builder.add_node("verify",    safe_node(self._verify_node,   {"audit_trail": ["verify:error"]}))
-        builder.add_node("finalize",  self._finalize_node)
+        builder.add_node(
+            "finalize",
+            safe_node(self._finalize_node, {"outcome": None, "audit_trail": ["finalize:error"]}),
+        )
 
         builder.add_conditional_edges(START, self._dispatch_sub_agents, ["run_sub_agent"])
         builder.add_edge("run_sub_agent", "aggregate")
@@ -127,17 +130,13 @@ class ParallelOrchestratorWeaver:
     def _retrieve_node(self, state: ParallelOrchestratorState) -> dict:
         task = state["task"]
         evidence = self.retriever.search(task.text)
-        audit = list(state.get("audit_trail") or [])
-        audit.append(f"retrieval:documents={len(evidence)}")
-        return {"evidence": evidence, "audit_trail": audit}
+        return {"evidence": evidence, "audit_trail": [f"retrieval:documents={len(evidence)}"]}
 
     def _policy_node(self, state: ParallelOrchestratorState) -> dict:
         task = state["task"]
         signal = state["signal"]
         policy = self.policy_agent.run(task, signal)
-        audit = list(state.get("audit_trail") or [])
-        audit.append(f"policy:allowed={','.join(policy.allowed_actions)}")
-        return {"policy": policy, "audit_trail": audit}
+        return {"policy": policy, "audit_trail": [f"policy:allowed={','.join(policy.allowed_actions)}"]}
 
     def _plan_node(self, state: ParallelOrchestratorState) -> dict:
         task = state["task"]
@@ -149,27 +148,53 @@ class ParallelOrchestratorWeaver:
         if self.plan_enrichment_fn:
             draft = self.plan_enrichment_fn(draft, state["findings"])
 
-        audit = list(state.get("audit_trail") or [])
-        audit.append(f"draft:action={draft.action}:confidence={draft.confidence}")
-        return {"draft": draft, "audit_trail": audit}
+        return {"draft": draft, "audit_trail": [f"draft:action={draft.action}:confidence={draft.confidence}"]}
 
     def _verify_node(self, state: ParallelOrchestratorState) -> dict:
         draft = state["draft"]
         policy = state["policy"]
         evidence = state["evidence"]
         verification = self.verifier_agent.run(draft, policy, evidence)
-        audit = list(state.get("audit_trail") or [])
-        audit.append(f"verify:approved={verification.approved}:score={verification.score}")
-        return {"verification": verification, "audit_trail": audit}
+        return {"verification": verification, "audit_trail": [f"verify:approved={verification.approved}:score={verification.score}"]}
 
     def _finalize_node(self, state: ParallelOrchestratorState) -> dict:
         task = state["task"]
-        signal = state["signal"]
-        evidence = state["evidence"]
-        policy = state["policy"]
-        draft = state["draft"]
-        verification = state["verification"]
+        signal = state.get("signal")
+        evidence = state.get("evidence") or ()
+        policy = state.get("policy")
+        draft = state.get("draft")
+        verification = state.get("verification")
         audit = list(state.get("audit_trail") or [])
+
+        # Guard: upstream safe_node failure may have left None in state.
+        if policy is None or draft is None or verification is None:
+            missing = [k for k, v in [("policy", policy), ("draft", draft), ("verification", verification)] if v is None]
+            audit.append(f"finalize:upstream_failure:missing={','.join(missing)}:escalating")
+            outcome = Outcome(
+                task_id=task.id,
+                use_case=task.use_case,
+                signal=signal or Signal(intent="unknown", risk=3),
+                evidence=evidence,
+                policy=policy or PolicyDecision(
+                    allowed_actions=(self.fallback_action,),
+                    reason="upstream node failure",
+                ),
+                draft=draft or Plan(
+                    action=self.fallback_action,
+                    confidence=0.0,
+                    response=self.fallback_response,
+                    internal_note="upstream node failure",
+                ),
+                verification=verification or Verification(
+                    approved=False, score=0.0,
+                    findings=("upstream node failed — see audit_trail",),
+                ),
+                final_action=self.fallback_action,
+                response=self.fallback_response,
+                internal_note=f"Upstream node failure: {', '.join(missing)} was None.",
+                audit_trail=audit,
+            )
+            return {"outcome": outcome}
 
         if verification.approved:
             final_action = draft.action

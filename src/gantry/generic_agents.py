@@ -22,6 +22,7 @@ LLM-powered planning is in llm.py (LangChainPlanner).
 
 from __future__ import annotations
 
+import copy
 import logging
 import re
 from dataclasses import dataclass, field
@@ -39,11 +40,21 @@ def safe_node(fn: Callable, fallback: dict | None = None) -> Callable:
     """Wrap a LangGraph node function so exceptions are caught gracefully.
 
     If the wrapped node raises any exception, it logs the error and returns
-    ``fallback`` instead of propagating the crash through the graph.
+    a **copy** of ``fallback`` instead of propagating the crash through the
+    graph.
+
+    Design notes:
+        - Returns ``copy.deepcopy(fallback)`` on every failure — a full deep
+          copy — so callers cannot corrupt the fallback by mutating returned
+          lists or dicts, even nested ones (e.g., ``audit_trail`` lists).
+        - Re-raises ``KeyboardInterrupt`` and ``SystemExit`` unconditionally
+          so that process signals and interpreter shutdowns are never swallowed.
 
     Args:
         fn:       The node function to wrap.
         fallback: State update dict to return on failure. Defaults to ``{}``.
+                  A defensive copy is taken at wrap time and again on every
+                  failure invocation.
 
     Returns:
         A wrapped callable with the same signature as ``fn``.
@@ -52,18 +63,20 @@ def safe_node(fn: Callable, fallback: dict | None = None) -> Callable:
 
         builder.add_node("signal", safe_node(self._signal_node, {"audit_trail": ["signal:error"]}))
     """
-    _fallback = fallback if fallback is not None else {}
+    _fallback: dict = dict(fallback) if fallback else {}
 
     def wrapper(*args: Any, **kwargs: Any) -> dict:
         try:
             return fn(*args, **kwargs)
+        except (KeyboardInterrupt, SystemExit):
+            raise  # never swallow process signals
         except Exception as exc:  # noqa: BLE001
             logger.error(
-                "Node '%s' raised an unexpected error: %s: %s",
-                fn.__name__, type(exc).__name__, exc,
+                "safe_node: '%s' failed — %s: %s",
+                fn.__qualname__, type(exc).__name__, exc,
                 exc_info=True,
             )
-            return _fallback
+            return copy.deepcopy(_fallback)  # deep copy — nested lists/dicts are also isolated
 
     wrapper.__name__ = fn.__name__
     wrapper.__qualname__ = fn.__qualname__
