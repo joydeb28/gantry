@@ -182,8 +182,9 @@ class HumanInTheLoopWeaver:
         human_approved = state.get("human_approved", False)
 
         if needs_approval and not human_approved:
-            audit = list(state.get("audit_trail") or [])
-            audit.append(f"checkpoint:awaiting_human_approval:intent={signal.intent}")
+            new_entries: list[str] = [
+                f"checkpoint:awaiting_human_approval:intent={signal.intent}",
+            ]
 
             # native LangGraph interrupt
             decision = interrupt({
@@ -196,10 +197,9 @@ class HumanInTheLoopWeaver:
             if isinstance(decision, dict):
                 approved = bool(decision.get("approved", False))
 
-            audit = list(state.get("audit_trail") or [])
             if approved:
-                audit.append("checkpoint:human_approved=true:resuming_pipeline")
-            return {"human_approved": approved, "audit_trail": audit}
+                new_entries.append("checkpoint:human_approved=true:resuming_pipeline")
+            return {"human_approved": approved, "audit_trail": new_entries}
 
         return {"human_approved": True}
 
@@ -230,12 +230,13 @@ class HumanInTheLoopWeaver:
         policy = state.get("policy")
         draft = state.get("draft")
         verification = state.get("verification")
-        audit = list(state.get("audit_trail") or [])
+        full_audit = list(state.get("audit_trail") or [])
+        new_entries: list[str] = []
 
         # Guard: upstream safe_node failure may have left None in state.
         if policy is None or draft is None or verification is None:
             missing = [k for k, v in [("policy", policy), ("draft", draft), ("verification", verification)] if v is None]
-            audit.append(f"finalize:upstream_failure:missing={','.join(missing)}:escalating")
+            new_entries.append(f"finalize:upstream_failure:missing={','.join(missing)}:escalating")
             outcome = Outcome(
                 task_id=task.id,
                 use_case=task.use_case,
@@ -258,9 +259,9 @@ class HumanInTheLoopWeaver:
                 final_action=self.fallback_action,
                 response=self.fallback_response,
                 internal_note=f"Upstream node failure: {', '.join(missing)} was None.",
-                audit_trail=audit,
+                audit_trail=full_audit + new_entries,
             )
-            return {"outcome": outcome}
+            return {"outcome": outcome, "audit_trail": new_entries}
 
         if verification.approved:
             final_action = draft.action
@@ -282,7 +283,7 @@ class HumanInTheLoopWeaver:
             final_action=final_action,
             response=response,
             internal_note=note,
-            audit_trail=audit,
+            audit_trail=full_audit + new_entries,
         )
         return {"outcome": outcome}
 
@@ -291,8 +292,9 @@ class HumanInTheLoopWeaver:
         signal = state["signal"]
         evidence = state["evidence"]
         policy = state["policy"]
-        audit = list(state.get("audit_trail") or [])
-        audit.append("checkpoint:human_approved=false:workflow_rejected")
+        full_audit = list(state.get("audit_trail") or [])
+        new_entries: list[str] = []
+        new_entries.append("checkpoint:human_approved=false:workflow_rejected")
 
         outcome = Outcome(
             task_id=task.id,
@@ -310,7 +312,7 @@ class HumanInTheLoopWeaver:
             final_action=self.fallback_action,
             response=self.fallback_response,
             internal_note="Workflow rejected by human reviewer.",
-            audit_trail=audit,
+            audit_trail=full_audit + new_entries,
         )
         return {"outcome": outcome}
 

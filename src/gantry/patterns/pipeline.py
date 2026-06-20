@@ -9,7 +9,7 @@ Each step has exactly one job and passes a typed claim to the next step.
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Optional
+from typing import Annotated, Optional, TypedDict
 from langgraph.graph import StateGraph, START, END
 
 from ..models import Task, Signal, Evidence, PolicyDecision, Plan, Verification, Outcome, AgentRecipe

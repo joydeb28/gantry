@@ -99,11 +99,11 @@ class RouterWeaver:
                 route = intent
                 break
 
-        audit = list(state.get("audit_trail") or [])
-        audit.append(f"router:classified_route={route}")
+        full_audit = list(state.get("audit_trail") or [])
+        new_entries: list[str] = [f"router:classified_route={route}"]
 
         signal = Signal(intent=route, risk=1)
-        return {"route": route, "signal": signal, "audit_trail": audit}
+        return {"route": route, "signal": signal, "audit_trail": new_entries}
 
     def _retrieve_node(self, state: RouterState) -> dict:
         task = state["task"]
@@ -120,16 +120,17 @@ class RouterWeaver:
             evidence = state["evidence"]
             specialist = self.routes[route_name]
 
-            audit = list(state.get("audit_trail") or [])
-            audit.append(f"dispatch:specialist={specialist.name}")
+            new_entries = [
+                f"dispatch:specialist={specialist.name}",
+            ]
 
             policy = specialist.policy_agent.run(task, signal)
-            audit.append(f"policy:allowed={','.join(policy.allowed_actions)}")
+            new_entries.append(f"policy:allowed={','.join(policy.allowed_actions)}")
 
             draft = specialist.planner_agent.run(task, signal, evidence, policy)
-            audit.append(f"draft:action={draft.action}:confidence={draft.confidence}")
+            new_entries.append(f"draft:action={draft.action}:confidence={draft.confidence}")
 
-            return {"policy": policy, "draft": draft, "audit_trail": audit}
+            return {"policy": policy, "draft": draft, "audit_trail": new_entries}
         return specialist_node
 
     def _verify_node(self, state: RouterState) -> dict:
@@ -146,12 +147,13 @@ class RouterWeaver:
         policy = state.get("policy")
         draft = state.get("draft")
         verification = state.get("verification")
-        audit = list(state.get("audit_trail") or [])
+        full_audit = list(state.get("audit_trail") or [])
+        new_entries: list[str] = []
 
         # Guard: upstream safe_node failure may have left None in state.
         if policy is None or draft is None or verification is None:
             missing = [k for k, v in [("policy", policy), ("draft", draft), ("verification", verification)] if v is None]
-            audit.append(f"finalize:upstream_failure:missing={','.join(missing)}:escalating")
+            new_entries.append(f"finalize:upstream_failure:missing={','.join(missing)}:escalating")
             outcome = Outcome(
                 task_id=task.id,
                 use_case=task.use_case,
@@ -174,9 +176,9 @@ class RouterWeaver:
                 final_action=self.fallback_action,
                 response=self.fallback_response,
                 internal_note=f"Upstream node failure: {', '.join(missing)} was None.",
-                audit_trail=audit,
+                audit_trail=full_audit + new_entries,
             )
-            return {"outcome": outcome}
+            return {"outcome": outcome, "audit_trail": new_entries}
 
         if verification.approved:
             final_action = draft.action
@@ -198,7 +200,7 @@ class RouterWeaver:
             final_action=final_action,
             response=response,
             internal_note=note,
-            audit_trail=audit,
+            audit_trail=full_audit + new_entries,
         )
         return {"outcome": outcome}
 

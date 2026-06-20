@@ -144,9 +144,10 @@ class ReflectionWeaver:
         task = state["task"]
         signal = state["signal"]
         policy = self.policy_agent.run(task, signal)
-        audit = list(state.get("audit_trail") or [])
-        audit.append(f"policy:allowed={','.join(policy.allowed_actions)}")
-        return {"policy": policy, "audit_trail": audit, "turn": 0}
+        full_audit = list(state.get("audit_trail") or [])
+        new_entries: list[str] = []
+        new_entries.append(f"policy:allowed={','.join(policy.allowed_actions)}")
+        return {"policy": policy, "audit_trail": new_entries, "turn": 0}
 
     def _drafter_node(self, state: ReflectionState) -> dict:
         task = state["task"]
@@ -185,13 +186,14 @@ class ReflectionWeaver:
 
         critique = self.critic_agent.run(draft, policy, evidence)
 
-        audit = list(state.get("audit_trail") or [])
-        audit.append(
+        full_audit = list(state.get("audit_trail") or [])
+        new_entries: list[str] = []
+        new_entries.append(
             f"turn:{turn}:action={draft.action}:confidence={draft.confidence:.2f}"
             f":critique_score={critique.score:.2f}:approved={critique.approved}"
         )
 
-        return {"critique": critique, "audit_trail": audit}
+        return {"critique": critique, "audit_trail": new_entries}
 
     def _should_loop(self, state: ReflectionState) -> str:
         critique = state["critique"]
@@ -217,12 +219,13 @@ class ReflectionWeaver:
         policy = state.get("policy")
         draft = state.get("draft")
         verification = state.get("verification")
-        audit = list(state.get("audit_trail") or [])
+        full_audit = list(state.get("audit_trail") or [])
+        new_entries: list[str] = []
 
         # Guard: upstream safe_node failure may have left None in state.
         if policy is None or draft is None or verification is None:
             missing = [k for k, v in [("policy", policy), ("draft", draft), ("verification", verification)] if v is None]
-            audit.append(f"finalize:upstream_failure:missing={','.join(missing)}:escalating")
+            new_entries.append(f"finalize:upstream_failure:missing={','.join(missing)}:escalating")
             outcome = Outcome(
                 task_id=task.id,
                 use_case=task.use_case,
@@ -245,9 +248,9 @@ class ReflectionWeaver:
                 final_action=self.fallback_action,
                 response=self.fallback_response,
                 internal_note=f"Upstream node failure: {', '.join(missing)} was None.",
-                audit_trail=audit,
+                audit_trail=full_audit + new_entries,
             )
-            return {"outcome": outcome}
+            return {"outcome": outcome, "audit_trail": new_entries}
 
         if verification.approved:
             final_action = draft.action
@@ -272,7 +275,7 @@ class ReflectionWeaver:
             final_action=final_action,
             response=response,
             internal_note=note,
-            audit_trail=audit,
+            audit_trail=full_audit + new_entries,
         )
         return {"outcome": outcome}
 

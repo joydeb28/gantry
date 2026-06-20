@@ -120,12 +120,12 @@ class ParallelOrchestratorWeaver:
         findings = state["findings"]
         intent, risk, tags, audit_logs = self.aggregation_policy(findings)
 
-        audit = list(state.get("audit_trail") or [])
-        audit.extend(audit_logs)
+        full_audit = list(state.get("audit_trail") or [])
+        new_entries: list[str] = list(audit_logs)  # sub-agent audit logs from aggregation_policy
 
         signal = Signal(intent=intent, risk=risk, tags=tuple(tags))
-        audit.append(f"signal:intent={intent}:risk={risk}")
-        return {"signal": signal, "audit_trail": audit}
+        new_entries.append(f"signal:intent={intent}:risk={risk}")
+        return {"signal": signal, "audit_trail": new_entries}
 
     def _retrieve_node(self, state: ParallelOrchestratorState) -> dict:
         task = state["task"]
@@ -164,12 +164,13 @@ class ParallelOrchestratorWeaver:
         policy = state.get("policy")
         draft = state.get("draft")
         verification = state.get("verification")
-        audit = list(state.get("audit_trail") or [])
+        full_audit = list(state.get("audit_trail") or [])
+        new_entries: list[str] = []
 
         # Guard: upstream safe_node failure may have left None in state.
         if policy is None or draft is None or verification is None:
             missing = [k for k, v in [("policy", policy), ("draft", draft), ("verification", verification)] if v is None]
-            audit.append(f"finalize:upstream_failure:missing={','.join(missing)}:escalating")
+            new_entries.append(f"finalize:upstream_failure:missing={','.join(missing)}:escalating")
             outcome = Outcome(
                 task_id=task.id,
                 use_case=task.use_case,
@@ -192,9 +193,9 @@ class ParallelOrchestratorWeaver:
                 final_action=self.fallback_action,
                 response=self.fallback_response,
                 internal_note=f"Upstream node failure: {', '.join(missing)} was None.",
-                audit_trail=audit,
+                audit_trail=full_audit + new_entries,
             )
-            return {"outcome": outcome}
+            return {"outcome": outcome, "audit_trail": new_entries}
 
         if verification.approved:
             final_action = draft.action
@@ -204,7 +205,7 @@ class ParallelOrchestratorWeaver:
             final_action = self.fallback_action
             response = self.fallback_response
             note = f"Verifier blocked: {'; '.join(verification.findings)}"
-            audit.append(f"fallback:{self.fallback_action}")
+            new_entries.append(f"fallback:{self.fallback_action}")
 
         outcome = Outcome(
             task_id=task.id,
@@ -217,7 +218,7 @@ class ParallelOrchestratorWeaver:
             final_action=final_action,
             response=response,
             internal_note=note,
-            audit_trail=audit,
+            audit_trail=full_audit + new_entries,
         )
         return {"outcome": outcome}
 

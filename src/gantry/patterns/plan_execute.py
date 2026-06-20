@@ -136,15 +136,16 @@ class PlanExecuteWeaver:
         draft = self.planner_agent.run(task, signal, evidence, policy)
         steps = list(self.step_map.get(signal.intent, ()))
 
-        audit = list(state.get("audit_trail") or [])
-        audit.append(f"plan:action={draft.action}:steps={len(steps)}")
+        full_audit = list(state.get("audit_trail") or [])
+        new_entries: list[str] = []
+        new_entries.append(f"plan:action={draft.action}:steps={len(steps)}")
 
         return {
             "draft": draft,
             "remaining_steps": steps,
             "executed_steps": [],
             "all_success": True,
-            "audit_trail": audit,
+            "audit_trail": new_entries,
         }
 
     def _execute_node(self, state: PlanExecuteState) -> dict:
@@ -152,7 +153,8 @@ class PlanExecuteWeaver:
         policy = state["policy"]
         remaining = list(state["remaining_steps"])
         executed = list(state["executed_steps"])
-        audit = list(state.get("audit_trail") or [])
+        full_audit = list(state.get("audit_trail") or [])
+        new_entries: list[str] = []
 
         step_name, step_action = remaining.pop(0)
 
@@ -164,25 +166,25 @@ class PlanExecuteWeaver:
                 success=False,
             )
             executed.append(step)
-            audit.append(
+            new_entries.append(
                 f"step:{step_name}:action={step_action}:success=False:reason=policy_blocked"
             )
             return {
                 "remaining_steps": remaining,
                 "executed_steps": executed,
                 "all_success": False,
-                "audit_trail": audit,
+                "audit_trail": new_entries,
             }
 
         result = f"Step '{step_name}' completed: {step_action} applied to {task.id}."
         step = ExecutionStep(name=step_name, action=step_action, result=result, success=True)
         executed.append(step)
-        audit.append(f"step:{step_name}:action={step_action}:success=True")
+        new_entries.append(f"step:{step_name}:action={step_action}:success=True")
 
         return {
             "remaining_steps": remaining,
             "executed_steps": executed,
-            "audit_trail": audit,
+            "audit_trail": new_entries,
         }
 
     def _should_execute(self, state: PlanExecuteState) -> str:
@@ -208,12 +210,13 @@ class PlanExecuteWeaver:
         draft = state.get("draft")
         verification = state.get("verification")
         executed = state.get("executed_steps") or []
-        audit = list(state.get("audit_trail") or [])
+        full_audit = list(state.get("audit_trail") or [])
+        new_entries: list[str] = []
 
         # Guard: upstream safe_node failure may have left None in state.
         if policy is None or draft is None or verification is None:
             missing = [k for k, v in [("policy", policy), ("draft", draft), ("verification", verification)] if v is None]
-            audit.append(f"finalize:upstream_failure:missing={','.join(missing)}:escalating")
+            new_entries.append(f"finalize:upstream_failure:missing={','.join(missing)}:escalating")
             outcome = Outcome(
                 task_id=task.id,
                 use_case=task.use_case,
@@ -236,9 +239,9 @@ class PlanExecuteWeaver:
                 final_action=self.fallback_action,
                 response=self.fallback_response,
                 internal_note=f"Upstream node failure: {', '.join(missing)} was None.",
-                audit_trail=audit,
+                audit_trail=full_audit + new_entries,
             )
-            return {"outcome": outcome}
+            return {"outcome": outcome, "audit_trail": new_entries}
 
         if verification.approved:
             final_action = executed[-1].action if executed else draft.action
@@ -263,7 +266,7 @@ class PlanExecuteWeaver:
             final_action=final_action,
             response=response,
             internal_note=note,
-            audit_trail=audit,
+            audit_trail=full_audit + new_entries,
         )
         return {"outcome": outcome}
 
@@ -274,7 +277,8 @@ class PlanExecuteWeaver:
         policy = state["policy"]
         draft = state["draft"]
         executed = state["executed_steps"]
-        audit = list(state.get("audit_trail") or [])
+        full_audit = list(state.get("audit_trail") or [])
+        new_entries: list[str] = []
 
         final_action = self.fallback_action
         response = self.fallback_response
@@ -295,7 +299,7 @@ class PlanExecuteWeaver:
             final_action=final_action,
             response=response,
             internal_note=note,
-            audit_trail=audit,
+            audit_trail=full_audit + new_entries,
         )
         return {"outcome": outcome}
 
