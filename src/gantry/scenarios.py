@@ -45,6 +45,8 @@ def weaver_for(
     base_url: Optional[str] = None,
     checkpoint_backend: str = "sqlite",
     db_url: Optional[str] = None,
+    reflection_threshold: Optional[float] = None,
+    reflection_turns: Optional[int] = None,
 ) -> Any:
     """Return the correct weaver for a use case, loaded with its KB.
 
@@ -52,15 +54,18 @@ def weaver_for(
     always exposes a run(task) -> Outcome method.
 
     Args:
-        use_case:            One of the registered use-case keys.
-        kb_root:             Root directory containing per-use-case KB folders.
-        planner_type:        Planning engine. One of:
-                             ``template`` (default, no LLM),
-                             ``ollama``, ``vllm``, ``openai``, ``gemini``, ``anthropic``.
-        model_name:          Model name for the LLM planner.
-        base_url:            Override LLM API base URL.
-        checkpoint_backend:  ``"sqlite"`` (default) or ``"postgres"`` for HITL.
-        db_url:              PostgreSQL connection URL (reads DATABASE_URL env var if not provided).
+        use_case:              One of the registered use-case keys.
+        kb_root:               Root directory containing per-use-case KB folders.
+        planner_type:          Planning engine. One of:
+                               ``template`` (default, no LLM),
+                               ``ollama``, ``vllm``, ``openai``, ``gemini``, ``anthropic``.
+        model_name:            Model name for the LLM planner.
+        base_url:              Override LLM API base URL.
+        checkpoint_backend:    ``"sqlite"`` (default) or ``"postgres"`` for HITL.
+        db_url:                PostgreSQL connection URL (reads DATABASE_URL env var if not provided).
+        reflection_threshold:  Override ReflectionWeaver approval_threshold (0.0–1.0).
+                               The critic loop exits early once the draft score meets this value.
+        reflection_turns:      Override ReflectionWeaver max_turns (default: 3).
     """
     builders = {
         "support": _pipeline_weaver,
@@ -100,6 +105,8 @@ def weaver_for(
         planner_agent=planner_agent,
         checkpoint_backend=checkpoint_backend,
         db_url=db_url,
+        reflection_threshold=reflection_threshold,
+        reflection_turns=reflection_turns,
     )
 
 
@@ -167,9 +174,16 @@ def _reflection_weaver(
     use_case: str,
     retriever: KnowledgeBaseRetriever,
     planner_agent: Optional[Any] = None,
+    reflection_threshold: Optional[float] = None,
+    reflection_turns: Optional[int] = None,
     **_kwargs: Any,
 ) -> ReflectionWeaver:
-    return legal_harness(retriever, planner_agent=planner_agent)
+    return legal_harness(
+        retriever,
+        planner_agent=planner_agent,
+        approval_threshold=reflection_threshold,
+        max_turns=reflection_turns,
+    )
 
 
 def _hitl_weaver(
@@ -553,7 +567,12 @@ def it_harness(retriever: KnowledgeBaseRetriever, planner_agent: Optional[Any] =
     )
 
 
-def legal_harness(retriever: KnowledgeBaseRetriever, planner_agent: Optional[Any] = None) -> ReflectionWeaver:
+def legal_harness(
+    retriever: KnowledgeBaseRetriever,
+    planner_agent: Optional[Any] = None,
+    approval_threshold: Optional[float] = None,
+    max_turns: Optional[int] = None,
+) -> ReflectionWeaver:
     """Legal & Compliance — Reflection / Critic Loop pattern.
 
     A drafter produces a plan. The critic checks citations, confidence,
@@ -593,8 +612,8 @@ def legal_harness(retriever: KnowledgeBaseRetriever, planner_agent: Optional[Any
         critic_agent=CriticAgent(min_confidence=0.75, require_citations=True),
         verifier_agent=BasicVerifierAgent(),
         retriever=retriever,
-        max_turns=3,
-        approval_threshold=0.7,
+        max_turns=max_turns if max_turns is not None else 3,
+        approval_threshold=approval_threshold if approval_threshold is not None else 0.7,
     )
 
 

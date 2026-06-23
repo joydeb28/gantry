@@ -94,6 +94,38 @@ def build_parser() -> argparse.ArgumentParser:
             "(e.g. postgresql://user:pass@localhost/gantry)."
         ),
     )
+    parser.add_argument(
+        "--reject",
+        metavar="THREAD_ID",
+        help=(
+            "Reject a pending HITL workflow with this thread ID. "
+            "Sends approved=False back through the interrupt, routing execution "
+            "to the finalize_rejected node. Use instead of --resume when a human "
+            "reviewer decides not to proceed."
+        ),
+    )
+    parser.add_argument(
+        "--reflection-threshold",
+        type=float,
+        default=None,
+        metavar="FLOAT",
+        help=(
+            "Override the ReflectionWeaver approval_threshold (0.0–1.0). "
+            "The critic loop exits early when the draft score meets or exceeds this value. "
+            "Default is the scenario default (usually 0.7)."
+        ),
+    )
+    parser.add_argument(
+        "--reflection-turns",
+        type=int,
+        default=None,
+        metavar="INT",
+        help=(
+            "Override the ReflectionWeaver max_turns. "
+            "The critic loop will not run more than this many revision cycles. "
+            "Default is the scenario default (usually 3)."
+        ),
+    )
     return parser
 
 
@@ -123,7 +155,21 @@ def main() -> None:
         model_name=args.model_profile,
         base_url=args.base_url,
         checkpoint_backend=args.checkpoint_backend,
+        reflection_threshold=args.reflection_threshold,
+        reflection_turns=args.reflection_turns,
     )
+
+    # --reject: send a human denial back through the HITL interrupt
+    if args.reject:
+        config = {"configurable": {"thread_id": args.reject}}
+        print(f"[gantry] Rejecting HITL workflow for thread '{args.reject}'...")
+        result = weaver.graph.invoke(Command(resume={"approved": False}), config=config)
+        outcome = result.get("outcome")
+        if outcome:
+            print(json.dumps(outcome.model_dump(), indent=2, default=str))
+        else:
+            print("[gantry] Rejection completed, but no outcome found in state.")
+        return
 
     if args.resume:
         config = {"configurable": {"thread_id": args.resume}}

@@ -378,6 +378,70 @@ class LangChainPlanner:
         )
         return plan
 
+    async def aplan(
+        self,
+        task: Task,
+        signal: Signal,
+        evidence: tuple[Evidence, ...],
+        policy: PolicyDecision,
+    ) -> Plan:
+        """Async variant of :meth:`plan` — uses ``ainvoke`` on the LangChain chain.
+
+        Retries up to ``_MAX_RETRIES`` times with exponential backoff + jitter.
+        Safe to call from any ``asyncio`` event loop; does **not** block threads.
+
+        Args:
+            task:     The input task.
+            signal:   Extracted intent and risk.
+            evidence: Retrieved KB documents.
+            policy:   Allowed/blocked actions.
+
+        Returns:
+            A fully validated ``Plan`` Pydantic object.
+        """
+        import asyncio
+
+        evidence_text = _build_evidence_text(evidence)
+        invoke_kwargs = {
+            "use_case":        task.use_case,
+            "title":           task.title,
+            "body":            task.body,
+            "intent":          signal.intent,
+            "risk":            signal.risk,
+            "missing_fields":  ", ".join(signal.missing_fields) or "none",
+            "allowed_actions": ", ".join(policy.allowed_actions),
+            "blocked_actions": ", ".join(policy.blocked_actions) or "none",
+            "policy_reason":   policy.reason or "standard policy",
+            "evidence_text":   evidence_text,
+        }
+
+        last_exc: Exception | None = None
+        plan: Plan | None = None
+
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                plan = await self._chain.ainvoke(invoke_kwargs)
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt < _MAX_RETRIES:
+                    delay = _RETRY_BASE_DELAY * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+                    logger.warning(
+                        "LangChain planner (async) attempt %d/%d failed (%s: %s); retrying in %.1fs",
+                        attempt, _MAX_RETRIES, type(exc).__name__, exc, delay,
+                    )
+                    await asyncio.sleep(delay)
+        else:
+            raise RuntimeError(
+                f"LangChain planner (async) failed after {_MAX_RETRIES} attempts"
+            ) from last_exc
+
+        logger.info(
+            "LangChain planner async [%s/%s] → action=%s confidence=%.2f",
+            self._provider, self._model, plan.action, plan.confidence,
+        )
+        return plan
+
 
 class LangChainPlannerAgent:
     """Wrapper that adapts LangChainPlanner to the agentic runner interface."""
@@ -393,3 +457,13 @@ class LangChainPlannerAgent:
         policy: PolicyDecision,
     ) -> Plan:
         return self.planner.plan(task, signal, evidence, policy)
+
+    async def arun(
+        self,
+        task: Task,
+        signal: Signal,
+        evidence: tuple[Evidence, ...],
+        policy: PolicyDecision,
+    ) -> Plan:
+        """Async variant of :meth:`run` — delegates to :meth:`LangChainPlanner.aplan`."""
+        return await self.planner.aplan(task, signal, evidence, policy)
