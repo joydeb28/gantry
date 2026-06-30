@@ -153,6 +153,10 @@ class KnowledgeBaseRetriever:
 
         self._retriever = index.as_retriever(similarity_top_k=top_k)
         self._use_case = use_case
+        self._kb_path = kb_path
+        self._top_k = top_k
+        self._embed_model_name = self._EMBED_MODEL
+        self._cache_dir = cache_dir
 
     # ------------------------------------------------------------------
     # Cache fingerprinting (O-7)
@@ -190,6 +194,38 @@ class KnowledgeBaseRetriever:
         """Persist the fingerprint alongside the index."""
         fp_file = cache_dir / cls._FINGERPRINT_FILE
         fp_file.write_text(json.dumps({"fingerprint": fingerprint}))
+
+    @classmethod
+    def _load_fingerprint(cls, kb_path: Path) -> str | None:
+        """Load the cached fingerprint given a kb_path (derives cache_dir automatically)."""
+        # Derive the cache_dir from the kb_path structure: kb_path ends in <use_case>/kb
+        # Cache is stored under .llama_index_cache/<use_case>/
+        use_case = kb_path.parent.name
+        cache_dir = cls._CACHE_BASE / use_case
+        return cls._load_cached_fingerprint(cache_dir)
+
+    def _rebuild_index(self) -> None:
+        """Rebuild the vector index from the KB directory.
+
+        Called by ``KBWatcher`` when a fingerprint change is detected.
+        Replaces ``self._retriever`` in-place under the caller's RLock.
+        """
+        from llama_index.core import SimpleDirectoryReader, VectorStoreIndex
+        from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+
+        embed_model = HuggingFaceEmbedding(model_name=self._embed_model_name)
+        docs = SimpleDirectoryReader(
+            input_dir=str(self._kb_path),
+            required_exts=[".md"],
+            recursive=False,
+        ).load_data()
+        index = VectorStoreIndex.from_documents(docs, embed_model=embed_model)
+        index.storage_context.persist(persist_dir=str(self._cache_dir))
+        self._retriever = index.as_retriever(similarity_top_k=self._top_k)
+        logger.info(
+            "KnowledgeBaseRetriever._rebuild_index: index rebuilt for use_case='%s'",
+            self._use_case,
+        )
 
     def search(self, query: str) -> tuple[Evidence, ...]:
         """Return top-k semantically relevant Evidence objects for the query."""
@@ -294,3 +330,116 @@ class RemoteRetriever:
             )
             for n in nodes
         )
+
+
+# ---------------------------------------------------------------------------
+# KBWatcher — live KB hot-reload
+# ---------------------------------------------------------------------------
+
+class KBWatcher:
+    """Background thread that monitors a KB directory and hot-reloads on change.
+
+    Uses the SHA-256 fingerprinting already built into ``KnowledgeBaseRetriever``
+    to detect when KB files are added, removed, or modified.  When a change is
+    detected, it rebuilds the vector index under a ``threading.RLock`` so that
+    concurrent ``search()`` calls are never interrupted mid-rebuild.
+
+    Args:
+        retriever:        The ``KnowledgeBaseRetriever`` to watch and reload.
+        poll_interval:    Seconds between fingerprint checks. Default: 30.
+
+    Example::
+
+        retriever = KnowledgeBaseRetriever.from_use_case("support")
+        watcher   = KBWatcher(retriever, poll_interval=30)
+        watcher.start()
+
+        # ... serve requests normally; watcher runs in background ...
+
+        watcher.stop()  # blocks until the background thread exits cleanly
+
+    Notes:
+        - ``KBWatcher`` only watches ``KnowledgeBaseRetriever`` instances
+          (not ``RemoteRetriever``).
+        - If the rebuild fails (e.g., a new file has malformed content), the
+          error is logged and the existing index continues to serve requests.
+        - ``stop()`` sets a stop flag and waits up to ``poll_interval + 2``
+          seconds for the thread to exit.
+    """
+
+    def __init__(
+        self,
+        retriever: "KnowledgeBaseRetriever",
+        poll_interval: float = 30.0,
+    ) -> None:
+        self._retriever = retriever
+        self._poll_interval = poll_interval
+        self._stop_event: "threading.Event | None" = None
+        self._thread: "threading.Thread | None" = None
+
+    def start(self) -> None:
+        """Start the background watcher thread."""
+        import threading
+
+        if self._thread is not None and self._thread.is_alive():
+            logger.warning("KBWatcher: already running — ignoring start() call.")
+            return
+
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._watch_loop,
+            name=f"KBWatcher-{self._retriever._use_case}",
+            daemon=True,
+        )
+        self._thread.start()
+        logger.info(
+            "KBWatcher: started for use_case=%s (poll_interval=%.0fs)",
+            self._retriever._use_case, self._poll_interval,
+        )
+
+    def stop(self) -> None:
+        """Signal the watcher thread to stop and wait for it to exit."""
+        if self._stop_event is None:
+            return
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self._poll_interval + 2)
+            if self._thread.is_alive():
+                logger.warning("KBWatcher: thread did not exit within timeout.")
+        logger.info("KBWatcher: stopped for use_case=%s", self._retriever._use_case)
+
+    def _watch_loop(self) -> None:
+        assert self._stop_event is not None
+        while not self._stop_event.wait(timeout=self._poll_interval):
+            try:
+                self._check_and_reload()
+            except Exception as exc:  # noqa: BLE001
+                logger.error("KBWatcher: error during check — %s", exc, exc_info=True)
+
+    def _check_and_reload(self) -> None:
+        """Compute current fingerprint; rebuild index if it has changed."""
+        kb_path = self._retriever._kb_path
+        current_fp = KnowledgeBaseRetriever._compute_fingerprint(kb_path)
+        cached_fp = KnowledgeBaseRetriever._load_fingerprint(kb_path)
+
+        if current_fp == cached_fp:
+            return  # no change
+
+        logger.info(
+            "KBWatcher: KB change detected for use_case=%s — rebuilding index...",
+            self._retriever._use_case,
+        )
+        try:
+            self._retriever._rebuild_index()
+            KnowledgeBaseRetriever._save_fingerprint(kb_path, current_fp)
+            logger.info(
+                "KBWatcher: index rebuilt for use_case=%s (new fingerprint=%s)",
+                self._retriever._use_case, current_fp[:12],
+            )
+        except Exception as exc:
+            logger.error(
+                "KBWatcher: index rebuild failed for use_case=%s — %s. "
+                "Existing index continues serving requests.",
+                self._retriever._use_case, exc,
+                exc_info=True,
+            )

@@ -440,3 +440,94 @@ class BasicVerifierAgent:
         approved = not findings
         score = max(0.0, 1.0 - 0.33 * len(findings))
         return Verification(approved=approved, score=score, findings=tuple(findings))
+
+
+# ---------------------------------------------------------------------------
+# Clarification Agent
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ClarificationAgent:
+    """Intercept tasks with missing required fields and ask for them first.
+
+    This agent wraps any ``PlannerAgentProtocol``-compatible planner.
+    When ``signal.missing_fields`` is non-empty, it returns a
+    ``Plan(action="ask_for_info", ...)`` with a targeted natural-language
+    question instead of guessing with incomplete data.
+
+    When all required fields are present, it delegates to ``fallback_planner``
+    unchanged — so it can be dropped into any ``AgentRecipe`` as the
+    ``planner_agent`` with zero impact on non-missing-field tasks.
+
+    Args:
+        fallback_planner: The underlying planner to use when no fields are
+                          missing.  Must satisfy ``PlannerAgentProtocol``.
+        field_questions:  ``{field_name: question_template}`` mapping.
+                          If a missing field is not in this dict, a generic
+                          question is generated automatically.
+        confidence:       Confidence to set on the clarification plan.
+                          Default: 1.0 (asking for info is always correct when
+                          required data is absent).
+
+    Example::
+
+        agent = ClarificationAgent(
+            fallback_planner=TemplatePlannerAgent(
+                templates={"replacement": ("replace", "Sending a replacement now.")},
+                default_action="escalate",
+                default_response="Escalating for review.",
+            ),
+            field_questions={
+                "order_id":   "Could you please provide your order number?",
+                "value_usd":  "What is the order value (in USD)?",
+                "sku":        "Which product SKU is affected?",
+            },
+        )
+        # Drop into AgentRecipe:
+        recipe = AgentRecipe(
+            use_case="support",
+            signal_agent=...,
+            policy_agent=...,
+            planner_agent=agent,   # <-- replaces TemplatePlannerAgent directly
+            verifier_agent=...,
+        )
+    """
+
+    fallback_planner: Any
+    field_questions: dict[str, str] = field(default_factory=dict)
+    confidence: float = 1.0
+
+    _DEFAULT_QUESTION_TEMPLATE = "Could you please provide your {field}?"
+
+    def run(
+        self,
+        task: Task,
+        signal: Signal,
+        evidence: tuple[Evidence, ...],
+        policy: PolicyDecision,
+    ) -> Plan:
+        if signal.missing_fields:
+            questions = []
+            for f in signal.missing_fields:
+                q = self.field_questions.get(
+                    f,
+                    self._DEFAULT_QUESTION_TEMPLATE.format(field=f.replace("_", " ")),
+                )
+                questions.append(q)
+
+            combined_question = " ".join(questions)
+            logger.info(
+                "ClarificationAgent: missing fields %s — requesting clarification",
+                signal.missing_fields,
+            )
+            return Plan(
+                action="ask_for_info",
+                confidence=self.confidence,
+                response=combined_question,
+                internal_note=(
+                    f"clarification_required: {','.join(signal.missing_fields)}"
+                ),
+                citations=(),
+            )
+
+        return self.fallback_planner.run(task, signal, evidence, policy)

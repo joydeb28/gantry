@@ -5,6 +5,8 @@
 
 `gantry` is a Python toolkit for building **agentic AI systems** using established orchestration patterns. Every use case runs with the pattern best suited to its domain — from a simple sequential pipeline to a cyclic reflection critic loop or human-in-the-loop workflow.
 
+> **v0.4.0** — Introduces the Production Harness: pluggable metrics emission, session-aware conversation memory, autonomous triggers (cron, polling, webhook), and dynamic step planning.
+
 ---
 
 ## Quick Start
@@ -67,12 +69,20 @@ gantry/
 │   │                      # Agent role Protocols: SignalAgentProtocol, PolicyAgentProtocol,
 │   │                      # PlannerAgentProtocol, VerifierAgentProtocol
 │   ├── generic_agents.py  # KeywordSignalAgent, SemanticSignalAgent, RulePolicyAgent,
-│   │                      # TemplatePlannerAgent, BasicVerifierAgent, safe_node()
+│   │                      # TemplatePlannerAgent, BasicVerifierAgent, ClarificationAgent,
+│   │                      # safe_node()
 │   ├── retrieval.py       # BaseRetriever protocol, KnowledgeBaseRetriever (filesystem),
-│   │                      # RemoteRetriever (in-memory, for external content sources)
+│   │                      # RemoteRetriever (in-memory), KBWatcher (hot-reload)
 │   ├── llm.py             # Multi-provider LangChain planner: ollama, openai, gemini,
 │   │                      # anthropic, vllm — all via build_llm() factory.
 │   │                      # Token budget guard + retry/backoff + async aplan()
+│   │                      # DynamicStepPlanner — LLM-powered step generation
+│   ├── metrics.py         # MetricsEmitter protocol, NoOpEmitter, LoggingEmitter,
+│   │                      # emit_outcome() helper (NEW in v0.4.0)
+│   ├── memory.py          # ConversationBuffer, InMemoryBackend, Turn (NEW in v0.4.0)
+│   ├── orchestration.py   # RetryOrchestrator — strategy escalation wrapper (NEW in v0.4.0)
+│   ├── triggers.py        # ScheduledTrigger (cron), PollingTrigger, WebhookTrigger,
+│   │                      # TriggerRunner — autonomous execution (NEW in v0.4.0)
 │   ├── scenarios.py       # Registry/Builders mapping use cases to graph weavers
 │   ├── cli.py             # CLI runner: --stream, --resume, --reject, --planner,
 │   │                      # --trace, --checkpoint-backend, --reflection-threshold,
@@ -84,9 +94,9 @@ gantry/
 │       ├── router.py              # RouterWeaver
 │       ├── reflection.py          # ReflectionWeaver + CriticAgent
 │       ├── hitl.py                # HumanInTheLoopWeaver (SQLite + PostgreSQL checkpointer)
-│       └── plan_execute.py        # PlanExecuteWeaver
+│       └── plan_execute.py        # PlanExecuteWeaver + DynamicStepPlanner support
 ├── examples/              # Knowledge bases (*.md) and task scenarios (*.json)
-├── tests/                 # Unit + integration tests (53 tests, all passing)
+├── tests/                 # Unit + integration tests
 └── pyproject.toml         # Dependencies and optional-dep groups per LLM provider
 ```
 
@@ -172,14 +182,121 @@ gantry --use-case hr --task examples/hr/task_onboarding.json \
 
 ---
 
-## Installing LLM Provider Extras
+## Production Harness — v0.4.0
+
+### Metrics Emission
+
+Every pattern weaver's `run()` method now emits three standard metrics after each execution:
+
+```python
+from gantry.metrics import LoggingEmitter
+from gantry.scenarios import weaver_for
+
+# Dev: log metrics to Python logger
+weaver = weaver_for("support", metrics=LoggingEmitter())
+
+# Production: plug in Prometheus or Datadog
+class PrometheusEmitter:
+    def emit(self, event: str, labels: dict[str, str], value: float) -> None:
+        self._counter.labels(**labels).inc(value)
+
+weaver = weaver_for("support", metrics=PrometheusEmitter(...))
+outcome = weaver.run(task)
+# Emits: gantry.outcome.count, gantry.outcome.action, gantry.verification
+```
+
+Any object with `emit(event: str, labels: dict[str, str], value: float) -> None` satisfies the `MetricsEmitter` protocol — no inheritance required. Default is `NoOpEmitter` (zero overhead).
+
+### Session Memory
+
+Conversation history can be maintained across calls using `ConversationBuffer`:
+
+```python
+from gantry.memory import ConversationBuffer
+from gantry.scenarios import weaver_for
+
+buf = ConversationBuffer(session_id="user-42", max_turns=10)
+weaver = weaver_for("support", memory=buf)
+
+outcome1 = weaver.run(task1)   # context: empty
+outcome2 = weaver.run(task2)   # context: previous turn injected into plan prompt
+```
+
+Backed by `InMemoryBackend` by default. Swap the backend for Redis or any persistent store by implementing the `MemoryBackend` protocol (`load(session_id) / save(session_id, turns)`).
+
+### Autonomous Triggers
+
+Run weavers without human input using three trigger types:
+
+```python
+from gantry.triggers import ScheduledTrigger, PollingTrigger, WebhookTrigger, TriggerRunner
+import asyncio
+
+# Cron-based: run every weekday at 08:00 (requires apscheduler, included in [prod])
+schedule = ScheduledTrigger(
+    cron="0 8 * * 1-5",
+    task_factory=lambda: Task(id="daily-1", use_case="finance", ...),
+    weaver=weaver_for("finance"),
+)
+
+# Interval polling: check a data source every 60 seconds
+poller = PollingTrigger(
+    interval_seconds=60,
+    source=lambda: db.fetch_pending_invoices(),
+    condition=lambda inv: inv["amount_usd"] > 10_000,
+    task_factory=lambda inv: Task(id=inv["id"], use_case="finance", ...),
+    weaver=weaver_for("finance"),
+)
+
+# Webhook: receive HTTP POST requests on a route
+hook = WebhookTrigger(
+    route="/hooks/zendesk",
+    task_factory=lambda body: Task(id=body["ticket_id"], use_case="support", ...),
+    weaver=weaver_for("support"),
+    port=9000,
+)
+
+# Manage all triggers in one event loop with graceful SIGTERM/SIGINT shutdown
+asyncio.run(TriggerRunner([schedule, poller, hook]).run())
+```
+
+### Strategy Retry (RetryOrchestrator)
+
+Escalate across multiple weaver strategies when verification fails:
+
+```python
+from gantry.orchestration import RetryOrchestrator
+from gantry.scenarios import weaver_for
+
+orchestrator = RetryOrchestrator(
+    strategies=[
+        lambda: weaver_for("support"),                        # fast template planner
+        lambda: weaver_for("support", planner="openai"),      # LLM for harder cases
+    ]
+)
+outcome = orchestrator.run(task)  # same run(task) → Outcome interface
+```
+
+### Dynamic Step Planning
+
+Replace the static `step_map` in `PlanExecuteWeaver` with an LLM-powered planner:
+
+```python
+from gantry.llm import DynamicStepPlanner
+from gantry.scenarios import weaver_for
+
+weaver = weaver_for("finance", dynamic_step_planner=DynamicStepPlanner(provider="openai"))
+# Steps are now generated per-task by the LLM instead of looked up in step_map
+```
+
+### Installing Production Extras
 
 ```bash
+pip install "gantry[prod]"           # HITL persistence + ScheduledTrigger (APScheduler)
 pip install "gantry[openai]"         # OpenAI (langchain-openai)
 pip install "gantry[gemini]"         # Gemini (langchain-google-genai)
 pip install "gantry[anthrop]"        # Anthropic (langchain-anthropic)
 pip install "gantry[all-providers]"  # All three cloud providers
-pip install "gantry[prod]"           # HITL persistence: SQLite + PostgreSQL
 ```
 
 ---
@@ -187,7 +304,7 @@ pip install "gantry[prod]"           # HITL persistence: SQLite + PostgreSQL
 ## Running Tests
 
 ```bash
-# Run all 53 unit and integration tests
+# Run all unit and integration tests
 .venv/bin/pytest -v
 ```
 
@@ -201,12 +318,17 @@ pip install "gantry[prod]"           # HITL persistence: SQLite + PostgreSQL
 - **Efficient State**: All pattern weavers use `Annotated[list[str], operator.add]` for `audit_trail` — nodes return only their new entries and LangGraph merges them, eliminating O(n) copy-and-extend on every node.
 - **Multi-Provider LLM**: `build_llm()` factory supports Ollama, OpenAI, Gemini, Anthropic, and vLLM — swap with a single flag.
 - **Semantic Retrieval**: `KnowledgeBaseRetriever` (filesystem) and `RemoteRetriever` (in-memory) both satisfy the `BaseRetriever` protocol; plug in Confluence, Notion, or any content source. SHA-256 fingerprinting detects stale KB caches automatically.
+- **Live KB Hot-Reload**: `KBWatcher` rebuilds the vector index in a background thread whenever KB files change — zero-downtime knowledge base updates in long-running services.
 - **Semantic Intent Detection**: `SemanticSignalAgent` uses `bge-small-en-v1.5` embeddings to handle natural-language paraphrasing — no keyword lists needed.
 - **Extensible Policy**: `RulePolicyAgent` accepts `custom_conditions` so domain-specific blocking logic can be injected without subclassing.
 - **Tunable Reflection**: `ReflectionWeaver` `approval_threshold` and `max_turns` are now CLI-configurable via `--reflection-threshold` and `--reflection-turns`.
 - **Full HITL Lifecycle**: `--resume` approves a pending HITL workflow; `--reject` denies it — both via the same interrupt/resume mechanism.
-- **Observability**: `--trace` enables zero-code LangSmith tracing; structured audit logs are written into every `Outcome`.
+- **Observability**: `--trace` enables zero-code LangSmith tracing; structured audit logs are written into every `Outcome`. Every `run()` call emits three standard metrics via the pluggable `MetricsEmitter` (v0.4.0).
 - **Production Persistence**: HITL workflows support SQLite (dev) and PostgreSQL (production) checkpointers via `--checkpoint-backend`.
+- **Session Memory**: `ConversationBuffer` carries multi-turn context across calls with pluggable backends (v0.4.0).
+- **Autonomous Execution**: `ScheduledTrigger`, `PollingTrigger`, and `WebhookTrigger` run weavers proactively from external events — all managed by `TriggerRunner` with graceful shutdown (v0.4.0).
+- **Strategy Resilience**: `RetryOrchestrator` escalates across weaver strategies when verification fails — same `run(task) → Outcome` interface (v0.4.0).
+- **Dynamic Planning**: `DynamicStepPlanner` replaces static `step_map` lookups in `PlanExecuteWeaver` with LLM-generated step sequences (v0.4.0).
 
 ---
 

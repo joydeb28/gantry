@@ -8,12 +8,16 @@ mini pipeline (policy + plan), keeping domain logic isolated.
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Any, Optional, TypedDict
+from typing import TYPE_CHECKING, Annotated, Any, Optional, TypedDict
 from langgraph.graph import StateGraph, START, END
 
 from ..generic_agents import BasicVerifierAgent, RulePolicyAgent, TemplatePlannerAgent, safe_node
+from ..metrics import NoOpEmitter, emit_outcome
 from ..models import Evidence, Outcome, Plan, PolicyDecision, Signal, Task, Verification
 from ..retrieval import KnowledgeBaseRetriever
+
+if TYPE_CHECKING:
+    from ..metrics import MetricsEmitter
 
 
 class SpecialistAgent:
@@ -49,6 +53,7 @@ class RouterWeaver:
         retriever: KnowledgeBaseRetriever,
         fallback_action: str = "escalate",
         fallback_response: str = "No specialist available for this request; escalating.",
+        emitter: "MetricsEmitter | None" = None,
     ) -> None:
         self.router_keywords = router_keywords
         self.routes = routes
@@ -57,6 +62,7 @@ class RouterWeaver:
         self.retriever = retriever
         self.fallback_action = fallback_action
         self.fallback_response = fallback_response
+        self._emitter = emitter or NoOpEmitter()
 
         builder = StateGraph(RouterState)
         builder.add_node("router",   safe_node(self._router_node,   {"route": self.default_route, "audit_trail": ["router:error"]}))
@@ -211,4 +217,13 @@ class RouterWeaver:
             "pattern:router",
         ]
         result = self.graph.invoke({"task": task, "audit_trail": initial_audit})
-        return result["outcome"]
+        outcome = result["outcome"]
+        emit_outcome(
+            self._emitter,
+            use_case=task.use_case,
+            pattern="router",
+            final_action=outcome.final_action,
+            approved=outcome.verification.approved,
+            verification_score=outcome.verification.score,
+        )
+        return outcome

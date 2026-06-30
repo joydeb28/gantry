@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gantry"
-version = "0.3.0"
+version = "0.4.0"
 description = "A multi-pattern agentic AI harness — LangGraph patterns, LangChain LLMs, LlamaIndex RAG, Pydantic v2 models."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -44,10 +44,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Production-grade HITL persistence
+# Production-grade HITL persistence + scheduled triggers
 prod = [
     "langgraph-checkpoint-sqlite",
     "langgraph-checkpoint-postgres",
+    "apscheduler>=3.10",
 ]
 # LLM provider extras — install only the one you use
 openai    = ["langchain-openai>=0.3"]

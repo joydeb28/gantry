@@ -19,9 +19,10 @@ Pattern summary:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from .generic_agents import BasicVerifierAgent, KeywordSignalAgent, RulePolicyAgent, TemplatePlannerAgent
+from .metrics import NoOpEmitter
 from .models import AgentRecipe, SubAgentFinding, FraudFinding, Task, Plan
 from .patterns.pipeline import PipelineWeaver
 from .patterns.hitl import HumanInTheLoopWeaver
@@ -31,6 +32,10 @@ from .patterns.plan_execute import PlanExecuteWeaver
 from .patterns.reflection import CriticAgent, ReflectionWeaver
 from .patterns.router import RouterWeaver, SpecialistAgent
 from .retrieval import KnowledgeBaseRetriever
+
+if TYPE_CHECKING:
+    from .memory import ConversationBuffer
+    from .metrics import MetricsEmitter
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +52,9 @@ def weaver_for(
     db_url: Optional[str] = None,
     reflection_threshold: Optional[float] = None,
     reflection_turns: Optional[int] = None,
+    metrics: "MetricsEmitter | None" = None,
+    memory: "ConversationBuffer | None" = None,
+    dynamic_step_planner: Optional[Any] = None,
 ) -> Any:
     """Return the correct weaver for a use case, loaded with its KB.
 
@@ -66,6 +74,14 @@ def weaver_for(
         reflection_threshold:  Override ReflectionWeaver approval_threshold (0.0–1.0).
                                The critic loop exits early once the draft score meets this value.
         reflection_turns:      Override ReflectionWeaver max_turns (default: 3).
+        metrics:               Optional ``MetricsEmitter`` for outcome telemetry.
+                               Defaults to ``NoOpEmitter()`` (zero overhead).
+        memory:                Optional ``ConversationBuffer`` for session-aware planning.
+                               When set, session context is injected into LLM prompts and
+                               each run's outcome is stored automatically.
+        dynamic_step_planner:  Optional ``DynamicStepPlanner`` for ``PlanExecuteWeaver``.
+                               When set, generates step lists via LLM instead of the
+                               static ``step_map`` lookup.
     """
     builders = {
         "support": _pipeline_weaver,
@@ -107,6 +123,9 @@ def weaver_for(
         db_url=db_url,
         reflection_threshold=reflection_threshold,
         reflection_turns=reflection_turns,
+        metrics=metrics,
+        memory=memory,
+        dynamic_step_planner=dynamic_step_planner,
     )
 
 
@@ -138,6 +157,8 @@ def _pipeline_weaver(
     use_case: str,
     retriever: KnowledgeBaseRetriever,
     planner_agent: Optional[Any] = None,
+    metrics: Optional[Any] = None,
+    memory: Optional[Any] = None,
     **_kwargs: Any,
 ) -> PipelineWeaver:
     recipe_map = {
@@ -149,7 +170,12 @@ def _pipeline_weaver(
     recipe = recipe_map[use_case]()
     if planner_agent is not None:
         recipe = recipe.model_copy(update={"planner_agent": planner_agent})
-    return PipelineWeaver(recipe, retriever)
+    return PipelineWeaver(
+        recipe,
+        retriever,
+        emitter=metrics or NoOpEmitter(),
+        memory=memory,
+    )
 
 
 def _orchestrator_weaver(
@@ -206,9 +232,16 @@ def _plan_execute_weaver(
     use_case: str,
     retriever: KnowledgeBaseRetriever,
     planner_agent: Optional[Any] = None,
+    metrics: Optional[Any] = None,
+    dynamic_step_planner: Optional[Any] = None,
     **_kwargs: Any,
 ) -> PlanExecuteWeaver:
-    return finance_harness(retriever, planner_agent=planner_agent)
+    return finance_harness(
+        retriever,
+        planner_agent=planner_agent,
+        emitter=metrics,
+        dynamic_step_planner=dynamic_step_planner,
+    )
 
 
 def _fraud_weaver(
@@ -668,7 +701,12 @@ def hr_harness(
     )
 
 
-def finance_harness(retriever: KnowledgeBaseRetriever, planner_agent: Optional[Any] = None) -> PlanExecuteWeaver:
+def finance_harness(
+    retriever: KnowledgeBaseRetriever,
+    planner_agent: Optional[Any] = None,
+    emitter: Optional[Any] = None,
+    dynamic_step_planner: Optional[Any] = None,
+) -> PlanExecuteWeaver:
     """Finance & Accounting — Plan -> Execute pattern.
 
     Invoice approvals run through a multi-step verified execution sequence
@@ -722,6 +760,8 @@ def finance_harness(retriever: KnowledgeBaseRetriever, planner_agent: Optional[A
                 ("summarize_budget", "summarize"),
             ),
         },
+        emitter=emitter or NoOpEmitter(),
+        dynamic_step_planner=dynamic_step_planner,
     )
 
 

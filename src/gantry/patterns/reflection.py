@@ -9,13 +9,17 @@ The loop continues until approved or max_turns is reached.
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Optional, TypedDict
+from typing import TYPE_CHECKING, Annotated, Optional, TypedDict
 from pydantic import BaseModel, ConfigDict
 from langgraph.graph import StateGraph, START, END
 
 from ..generic_agents import BasicVerifierAgent, KeywordSignalAgent, RulePolicyAgent, TemplatePlannerAgent, safe_node
+from ..metrics import NoOpEmitter, emit_outcome
 from ..models import Evidence, Outcome, Plan, PolicyDecision, Signal, Task, Verification
 from ..retrieval import KnowledgeBaseRetriever
+
+if TYPE_CHECKING:
+    from ..metrics import MetricsEmitter
 
 
 class Critique(BaseModel):
@@ -86,6 +90,7 @@ class ReflectionWeaver:
         approval_threshold: float = 0.7,
         fallback_action: str = "escalate",
         fallback_response: str = "Could not produce an approved plan after reflection; escalating.",
+        emitter: "MetricsEmitter | None" = None,
     ) -> None:
         self.signal_agent = signal_agent
         self.policy_agent = policy_agent
@@ -96,6 +101,7 @@ class ReflectionWeaver:
         self.max_turns = max_turns
         self.approval_threshold = approval_threshold
         self.fallback_action = fallback_action
+        self._emitter = emitter or NoOpEmitter()
         self.fallback_response = fallback_response
 
         builder = StateGraph(ReflectionState)
@@ -286,4 +292,13 @@ class ReflectionWeaver:
             "pattern:reflection",
         ]
         result = self.graph.invoke({"task": task, "audit_trail": initial_audit, "turn": 0})
-        return result["outcome"]
+        outcome = result["outcome"]
+        emit_outcome(
+            self._emitter,
+            use_case=task.use_case,
+            pattern="reflection",
+            final_action=outcome.final_action,
+            approved=outcome.verification.approved,
+            verification_score=outcome.verification.score,
+        )
+        return outcome

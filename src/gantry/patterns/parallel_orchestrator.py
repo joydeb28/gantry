@@ -7,13 +7,17 @@ Findings are fanned back in and aggregated using a custom domain policy.
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Any, Callable, Optional, Protocol, TypedDict, runtime_checkable
+from typing import TYPE_CHECKING, Annotated, Any, Callable, Optional, Protocol, TypedDict, runtime_checkable
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send
 
 from ..generic_agents import BasicVerifierAgent, RulePolicyAgent, TemplatePlannerAgent, safe_node
+from ..metrics import NoOpEmitter, emit_outcome
 from ..models import Evidence, Outcome, Plan, PolicyDecision, Signal, Task, Verification
 from ..retrieval import KnowledgeBaseRetriever
+
+if TYPE_CHECKING:
+    from ..metrics import MetricsEmitter
 
 
 @runtime_checkable
@@ -70,6 +74,7 @@ class ParallelOrchestratorWeaver:
         fallback_action: str = "escalate",
         fallback_response: str = "Verification failed; routing to review.",
         initial_audit_fn: Optional[Callable[[Task], list[str]]] = None,
+        emitter: "MetricsEmitter | None" = None,
     ) -> None:
         self.sub_agents = sub_agents
         self.policy_agent = policy_agent
@@ -81,6 +86,7 @@ class ParallelOrchestratorWeaver:
         self.fallback_action = fallback_action
         self.fallback_response = fallback_response
         self.initial_audit_fn = initial_audit_fn
+        self._emitter = emitter or NoOpEmitter()
 
         builder = StateGraph(ParallelOrchestratorState)
         builder.add_node("run_sub_agent", safe_node(self._run_sub_agent_node, {"findings": []}))
@@ -233,4 +239,13 @@ class ParallelOrchestratorWeaver:
                 "pattern:parallel_orchestrator",
             ]
         result = self.graph.invoke({"task": task, "audit_trail": initial_audit, "findings": []})
-        return result["outcome"]
+        outcome = result["outcome"]
+        emit_outcome(
+            self._emitter,
+            use_case=task.use_case,
+            pattern="parallel_orchestrator",
+            final_action=outcome.final_action,
+            approved=outcome.verification.approved,
+            verification_score=outcome.verification.score,
+        )
+        return outcome

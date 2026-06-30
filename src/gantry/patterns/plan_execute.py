@@ -7,13 +7,17 @@ independently. If any step fails, the loop short-circuits to the fallback path.
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Optional, TypedDict
+from typing import TYPE_CHECKING, Annotated, Any, Optional, TypedDict
 from pydantic import BaseModel, ConfigDict
 from langgraph.graph import StateGraph, START, END
 
 from ..generic_agents import BasicVerifierAgent, KeywordSignalAgent, RulePolicyAgent, TemplatePlannerAgent, safe_node
+from ..metrics import NoOpEmitter, emit_outcome
 from ..models import Evidence, Outcome, Plan, PolicyDecision, Signal, Task, Verification
 from ..retrieval import KnowledgeBaseRetriever
+
+if TYPE_CHECKING:
+    from ..metrics import MetricsEmitter
 
 
 class ExecutionStep(BaseModel):
@@ -54,6 +58,8 @@ class PlanExecuteWeaver:
         step_map: dict[str, tuple[tuple[str, str], ...]],
         fallback_action: str = "escalate",
         fallback_response: str = "One or more execution steps failed; escalating for review.",
+        emitter: "MetricsEmitter | None" = None,
+        dynamic_step_planner: Any = None,
     ) -> None:
         self.signal_agent = signal_agent
         self.policy_agent = policy_agent
@@ -63,6 +69,8 @@ class PlanExecuteWeaver:
         self.step_map = step_map
         self.fallback_action = fallback_action
         self.fallback_response = fallback_response
+        self._emitter = emitter or NoOpEmitter()
+        self._dynamic_step_planner = dynamic_step_planner
 
         builder = StateGraph(PlanExecuteState)
         builder.add_node("signal",          safe_node(self._signal_node,   {"audit_trail": ["signal:error"]}))
@@ -134,7 +142,10 @@ class PlanExecuteWeaver:
         policy = state["policy"]
 
         draft = self.planner_agent.run(task, signal, evidence, policy)
-        steps = list(self.step_map.get(signal.intent, ()))
+        if self._dynamic_step_planner is not None:
+            steps = list(self._dynamic_step_planner.generate_steps(task, signal, policy))
+        else:
+            steps = list(self.step_map.get(signal.intent, ()))
 
         full_audit = list(state.get("audit_trail") or [])
         new_entries: list[str] = []
@@ -310,4 +321,13 @@ class PlanExecuteWeaver:
             "pattern:plan_execute",
         ]
         result = self.graph.invoke({"task": task, "audit_trail": initial_audit})
-        return result["outcome"]
+        outcome = result["outcome"]
+        emit_outcome(
+            self._emitter,
+            use_case=task.use_case,
+            pattern="plan_execute",
+            final_action=outcome.final_action,
+            approved=outcome.verification.approved,
+            verification_score=outcome.verification.score,
+        )
+        return outcome

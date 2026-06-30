@@ -85,7 +85,7 @@ EVIDENCE (retrieved KB documents)
 ----------------------------------
 {evidence_text}
 
-Produce a plan. Return valid JSON matching the Plan schema.
+{session_context_block}Produce a plan. Return valid JSON matching the Plan schema.
 """
 
 
@@ -320,35 +320,44 @@ class LangChainPlanner:
         signal: Signal,
         evidence: tuple[Evidence, ...],
         policy: PolicyDecision,
+        session_context: str = "",
     ) -> Plan:
-        """Generate a Plan using the LLM.
+        """Generate a Plan using the configured LLM provider.
 
         Retries up to ``_MAX_RETRIES`` times with exponential backoff + jitter
-        on any transient error (network timeout, rate-limit, malformed output).
-        Raises ``RuntimeError`` only after all retries are exhausted.
+        on transient failures.  Raises ``RuntimeError`` only after all attempts
+        are exhausted.
 
         Args:
-            task:     The input task.
-            signal:   Extracted intent and risk.
-            evidence: Retrieved KB documents.
-            policy:   Allowed/blocked actions.
+            task:             The input task.
+            signal:           Extracted intent and risk.
+            evidence:         Retrieved KB documents.
+            policy:           Allowed/blocked actions.
+            session_context:  Optional formatted conversation history string
+                              from ``ConversationBuffer.get_context()``.  When
+                              non-empty, injected above the instruction line so
+                              the LLM can reference prior interactions.
 
         Returns:
             A fully validated ``Plan`` Pydantic object.
         """
         evidence_text = _build_evidence_text(evidence)
+        session_context_block = (
+            f"{session_context}\n\n" if session_context else ""
+        )
 
         invoke_kwargs = {
-            "use_case":        task.use_case,
-            "title":           task.title,
-            "body":            task.body,
-            "intent":          signal.intent,
-            "risk":            signal.risk,
-            "missing_fields":  ", ".join(signal.missing_fields) or "none",
-            "allowed_actions": ", ".join(policy.allowed_actions),
-            "blocked_actions": ", ".join(policy.blocked_actions) or "none",
-            "policy_reason":   policy.reason or "standard policy",
-            "evidence_text":   evidence_text,
+            "use_case":              task.use_case,
+            "title":                 task.title,
+            "body":                  task.body,
+            "intent":                signal.intent,
+            "risk":                  signal.risk,
+            "missing_fields":        ", ".join(signal.missing_fields) or "none",
+            "allowed_actions":       ", ".join(policy.allowed_actions),
+            "blocked_actions":       ", ".join(policy.blocked_actions) or "none",
+            "policy_reason":         policy.reason or "standard policy",
+            "evidence_text":         evidence_text,
+            "session_context_block": session_context_block,
         }
 
         last_exc: Exception | None = None
@@ -384,6 +393,7 @@ class LangChainPlanner:
         signal: Signal,
         evidence: tuple[Evidence, ...],
         policy: PolicyDecision,
+        session_context: str = "",
     ) -> Plan:
         """Async variant of :meth:`plan` — uses ``ainvoke`` on the LangChain chain.
 
@@ -402,17 +412,21 @@ class LangChainPlanner:
         import asyncio
 
         evidence_text = _build_evidence_text(evidence)
+        session_context_block = (
+            f"{session_context}\n\n" if session_context else ""
+        )
         invoke_kwargs = {
-            "use_case":        task.use_case,
-            "title":           task.title,
-            "body":            task.body,
-            "intent":          signal.intent,
-            "risk":            signal.risk,
-            "missing_fields":  ", ".join(signal.missing_fields) or "none",
-            "allowed_actions": ", ".join(policy.allowed_actions),
-            "blocked_actions": ", ".join(policy.blocked_actions) or "none",
-            "policy_reason":   policy.reason or "standard policy",
-            "evidence_text":   evidence_text,
+            "use_case":              task.use_case,
+            "title":                 task.title,
+            "body":                  task.body,
+            "intent":                signal.intent,
+            "risk":                  signal.risk,
+            "missing_fields":        ", ".join(signal.missing_fields) or "none",
+            "allowed_actions":       ", ".join(policy.allowed_actions),
+            "blocked_actions":       ", ".join(policy.blocked_actions) or "none",
+            "policy_reason":         policy.reason or "standard policy",
+            "evidence_text":         evidence_text,
+            "session_context_block": session_context_block,
         }
 
         last_exc: Exception | None = None
@@ -467,3 +481,118 @@ class LangChainPlannerAgent:
     ) -> Plan:
         """Async variant of :meth:`run` — delegates to :meth:`LangChainPlanner.aplan`."""
         return await self.planner.aplan(task, signal, evidence, policy)
+
+
+# ---------------------------------------------------------------------------
+# Dynamic Step Planner (for PlanExecuteWeaver)
+# ---------------------------------------------------------------------------
+
+from pydantic import BaseModel as _BaseModel, ConfigDict as _ConfigDict  # noqa: E402
+
+
+class DynamicStepPlan(_BaseModel):
+    """Structured output schema for LLM-generated execution step lists.
+
+    Used by ``DynamicStepPlanner`` with ``with_structured_output`` so the LLM
+    returns a validated, typed step list rather than free-form text.
+
+    Each step is a ``[step_name, step_action]`` pair where:
+    - ``step_name`` is a descriptive label (e.g. ``"validate_invoice"``)
+    - ``step_action`` must be one of the ``allowed_actions`` in the current policy
+    """
+
+    model_config = _ConfigDict(frozen=True)
+
+    steps: list[list[str]]   # [[step_name, step_action], ...]
+    reasoning: str = ""
+
+
+class DynamicStepPlanner:
+    """LLM-generated step list for ``PlanExecuteWeaver``.
+
+    Calls the LLM with a structured output schema to generate the sequence
+    of steps for a given task, replacing the static ``step_map`` lookup in
+    ``PlanExecuteWeaver``.
+
+    Args:
+        provider:   LLM provider (same options as ``LangChainPlanner``).
+        model:      Model name override.
+        base_url:   API base URL override.
+
+    Example::
+
+        from gantry.scenarios import weaver_for
+        from gantry.llm import DynamicStepPlanner
+
+        planner = DynamicStepPlanner(provider="openai", model="gpt-4o-mini")
+        weaver  = weaver_for("finance", dynamic_step_planner=planner)
+        outcome = weaver.run(task)
+        # Steps are generated by the LLM rather than looked up from step_map
+    """
+
+    _STEP_SYSTEM_PROMPT = """\
+You are a task decomposition engine. Given a task and allowed actions,
+produce an ordered list of execution steps. Each step must use one of the
+allowed_actions. Generate 2-5 steps. Be specific and actionable.
+"""
+
+    _STEP_HUMAN_TEMPLATE = """\
+Task: {title}\nBody: {body}\nIntent: {intent}\nAllowed actions: {allowed_actions}\n
+Generate an ordered execution plan as a list of [step_name, step_action] pairs.
+"""
+
+    def __init__(
+        self,
+        provider: str = "ollama",
+        model: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
+        llm = build_llm(provider=provider, model=model, base_url=base_url)
+        structured = llm.with_structured_output(DynamicStepPlan)
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", self._STEP_SYSTEM_PROMPT),
+            ("human", self._STEP_HUMAN_TEMPLATE),
+        ])
+        self._chain = prompt | structured
+        self._provider = provider
+
+    def generate_steps(
+        self,
+        task: "Task",
+        signal: "Signal",
+        policy: "PolicyDecision",
+    ) -> list[tuple[str, str]]:
+        """Call the LLM and return a step list suitable for ``PlanExecuteWeaver``.
+
+        Args:
+            task:    The input task.
+            signal:  Extracted intent and risk.
+            policy:  Current policy decision (source of allowed_actions).
+
+        Returns:
+            List of ``(step_name, step_action)`` tuples.
+            Falls back to ``[("default", allowed_actions[0])]`` if the LLM
+            call fails or returns an empty step list.
+        """
+        try:
+            result: DynamicStepPlan = self._chain.invoke({
+                "title":          task.title,
+                "body":           task.body,
+                "intent":         signal.intent,
+                "allowed_actions": ", ".join(policy.allowed_actions),
+            })
+            steps = [(s[0], s[1]) for s in result.steps if len(s) >= 2]
+            if steps:
+                logger.info(
+                    "DynamicStepPlanner [%s]: generated %d steps for intent='%s'",
+                    self._provider, len(steps), signal.intent,
+                )
+                return steps
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "DynamicStepPlanner: LLM call failed (%s) — using fallback step.",
+                exc,
+            )
+        # Safe fallback: single step using the first allowed action
+        fallback_action = policy.allowed_actions[0] if policy.allowed_actions else "escalate"
+        return [("default", fallback_action)]

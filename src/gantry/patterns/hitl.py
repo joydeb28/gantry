@@ -15,14 +15,18 @@ import operator
 import logging
 import os
 import sqlite3
-from typing import Annotated, Any, Optional, TypedDict
+from typing import TYPE_CHECKING, Annotated, Any, Optional, TypedDict
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import interrupt
 
 from ..generic_agents import BasicVerifierAgent, KeywordSignalAgent, RulePolicyAgent, TemplatePlannerAgent, safe_node
+from ..metrics import NoOpEmitter, emit_outcome
 from ..models import Evidence, Outcome, Plan, PolicyDecision, Signal, Task, Verification
 from ..retrieval import KnowledgeBaseRetriever
+
+if TYPE_CHECKING:
+    from ..metrics import MetricsEmitter
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +113,7 @@ class HumanInTheLoopWeaver:
         checkpointer: Optional[Any] = None,
         checkpoint_backend: str = "sqlite",
         db_url: str | None = None,
+        emitter: "MetricsEmitter | None" = None,
     ) -> None:
         self.signal_agent = signal_agent
         self.policy_agent = policy_agent
@@ -118,6 +123,7 @@ class HumanInTheLoopWeaver:
         self.approval_required_intents = approval_required_intents
         self.fallback_action = fallback_action
         self.fallback_response = fallback_response
+        self._emitter = emitter or NoOpEmitter()
 
         if checkpointer is None:
             checkpointer = _build_checkpointer(checkpoint_backend, db_url)
@@ -366,4 +372,14 @@ class HumanInTheLoopWeaver:
                 audit_trail=audit,
             )
 
-        return result["outcome"]
+        outcome = result["outcome"]
+        if outcome is not None:
+            emit_outcome(
+                self._emitter,
+                use_case=task.use_case,
+                pattern="hitl",
+                final_action=outcome.final_action,
+                approved=outcome.verification.approved,
+                verification_score=outcome.verification.score,
+            )
+        return outcome

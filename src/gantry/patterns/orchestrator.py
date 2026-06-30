@@ -8,13 +8,17 @@ intent classification map, and then the shared Policy -> Plan -> Verify pipeline
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Any, Optional, Protocol, TypedDict, runtime_checkable
+from typing import TYPE_CHECKING, Annotated, Any, Optional, Protocol, TypedDict, runtime_checkable
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send
 
 from ..generic_agents import BasicVerifierAgent, RulePolicyAgent, TemplatePlannerAgent, safe_node
+from ..metrics import NoOpEmitter, emit_outcome
 from ..models import Evidence, Outcome, Plan, PolicyDecision, Signal, Task, Verification, SubAgentFinding
 from ..retrieval import KnowledgeBaseRetriever
+
+if TYPE_CHECKING:
+    from ..metrics import MetricsEmitter
 
 
 @runtime_checkable
@@ -69,6 +73,7 @@ class OrchestratorWeaver:
         default_intent: str = "safe",
         fallback_action: str = "escalate",
         fallback_response: str = "Guardrail verification failed; route to review.",
+        emitter: "MetricsEmitter | None" = None,
     ) -> None:
         self.sub_agents = sub_agents
         self.policy_agent = policy_agent
@@ -78,6 +83,7 @@ class OrchestratorWeaver:
         self.intent_map = intent_map
         self.default_intent = default_intent
         self.fallback_action = fallback_action
+        self._emitter = emitter or NoOpEmitter()
         self.fallback_response = fallback_response
 
         builder = StateGraph(OrchestratorState)
@@ -241,4 +247,13 @@ class OrchestratorWeaver:
             "pattern:orchestrator",
         ]
         result = self.graph.invoke({"task": task, "audit_trail": initial_audit, "findings": []})
-        return result["outcome"]
+        outcome = result["outcome"]
+        emit_outcome(
+            self._emitter,
+            use_case=task.use_case,
+            pattern="orchestrator",
+            final_action=outcome.final_action,
+            approved=outcome.verification.approved,
+            verification_score=outcome.verification.score,
+        )
+        return outcome

@@ -9,12 +9,17 @@ Each step has exactly one job and passes a typed claim to the next step.
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Optional, TypedDict
+from typing import TYPE_CHECKING, Annotated, Optional, TypedDict
 from langgraph.graph import StateGraph, START, END
 
+from ..metrics import NoOpEmitter, emit_outcome
 from ..models import Task, Signal, Evidence, PolicyDecision, Plan, Verification, Outcome, AgentRecipe
 from ..retrieval import KnowledgeBaseRetriever
 from ..generic_agents import safe_node
+
+if TYPE_CHECKING:
+    from ..memory import ConversationBuffer
+    from ..metrics import MetricsEmitter
 
 
 class PipelineState(TypedDict):
@@ -31,9 +36,17 @@ class PipelineState(TypedDict):
 class PipelineWeaver:
     """Pipeline Pattern using LangGraph StateGraph."""
 
-    def __init__(self, recipe: AgentRecipe, retriever: KnowledgeBaseRetriever) -> None:
+    def __init__(
+        self,
+        recipe: AgentRecipe,
+        retriever: KnowledgeBaseRetriever,
+        emitter: "MetricsEmitter | None" = None,
+        memory: "ConversationBuffer | None" = None,
+    ) -> None:
         self.recipe = recipe
         self.retriever = retriever
+        self._emitter = emitter or NoOpEmitter()
+        self._memory = memory
 
         builder = StateGraph(PipelineState)
         builder.add_node("signal",   safe_node(self._signal_node,   {"audit_trail": ["signal:error"]}))
@@ -86,7 +99,14 @@ class PipelineWeaver:
         signal = state["signal"]
         evidence = state["evidence"]
         policy = state["policy"]
-        draft = self.recipe.planner_agent.run(task, signal, evidence, policy)
+        # Inject session context if memory is configured and planner supports it
+        session_context = self._memory.get_context() if self._memory else ""
+        planner = self.recipe.planner_agent
+        if session_context and hasattr(planner, "planner") and hasattr(planner.planner, "plan"):
+            # LangChainPlannerAgent wraps a LangChainPlanner
+            draft = planner.planner.plan(task, signal, evidence, policy, session_context=session_context)
+        else:
+            draft = planner.run(task, signal, evidence, policy)
         return {
             "draft": draft,
             "audit_trail": [f"draft:action={draft.action}:confidence={draft.confidence}"],
@@ -180,4 +200,15 @@ class PipelineWeaver:
             "pattern:pipeline",
         ]
         result = self.graph.invoke({"task": task, "audit_trail": initial_audit})
-        return result["outcome"]
+        outcome = result["outcome"]
+        emit_outcome(
+            self._emitter,
+            use_case=task.use_case,
+            pattern="pipeline",
+            final_action=outcome.final_action,
+            approved=outcome.verification.approved,
+            verification_score=outcome.verification.score,
+        )
+        if self._memory is not None:
+            self._memory.add(task, outcome)
+        return outcome
